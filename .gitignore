@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reproducible study datasets, checkpoints, and generated reports
+outputs/
