@@ -10,7 +10,8 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy (>=2.5.2,<3.0.0)",
     "matplotlib (>=3.11.1,<4.0.0)",
-    "scipy (>=1.18.1,<2.0.0)"
+    "scipy (>=1.18.1,<2.0.0)",
+    "scipy-stubs (>=1.18.1.0,<2.0.0.0)"
 ]
 
 

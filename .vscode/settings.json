@@ -14,5 +14,9 @@
         "editor.codeActionsOnSave": {
             "source.organizeImports": "explicit"
         }
-    }
+    },
+    "cSpell.words": [
+        "brentq",
+        "linalg"
+    ]
 }
