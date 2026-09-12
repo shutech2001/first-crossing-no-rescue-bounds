@@ -222,3 +222,6 @@ results/
 
 # .DS_Store
 .DS_Store
+
+# test code
+src/tests/
