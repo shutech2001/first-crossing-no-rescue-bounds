@@ -1,7 +1,7 @@
 [project]
-name = "no-rescue-causal-effects"
+name = "first-crossing-no-rescue-bounds"
 version = "0.1.0"
-description = ""
+description = "Reproducible code for the numerical experiments in 'First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue'"
 authors = [
     {name = "Shu Tamano"}
 ]
