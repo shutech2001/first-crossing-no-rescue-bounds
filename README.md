@@ -1,6 +1,6 @@
-# Experiments for "Boundary Reduction and Inference for No-Rescue Effects under Deterministic Rescue"
+# Experiments for "First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue"
 
-Reproducible code for the numerical experiments in "Boundary Reduction and Inference for No-Rescue Effects under Deterministic Rescue". The simulations use seed 42 by default.
+Reproducible code for the numerical experiments in "First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue". The simulations use seed 42 by default.
 
 ## Reproducing the Experiments
 
@@ -8,7 +8,7 @@ Reproducible code for the numerical experiments in "Boundary Reduction and Infer
 
 ```bash
 # clone the repository
-git clone git@github.com:shutech2001/no-rescue-causal-effects.git
+git clone git@github.com:shutech2001/first-crossing-no-rescue-bounds.git
 
 # build the environment with poetry
 poetry install
