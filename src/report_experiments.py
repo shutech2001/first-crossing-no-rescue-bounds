@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -60,13 +61,13 @@ METHOD_STYLE = {
 
 
 def curve_style(index: int) -> dict:
-    return dict(
-        color=CURVE_COLORS[index],
-        marker=CURVE_MARKERS[index],
-        linestyle=CURVE_LINES[index],
-        markerfacecolor="white",
-        markeredgewidth=1.5,
-    )
+    return {
+        "color": CURVE_COLORS[index],
+        "marker": CURVE_MARKERS[index],
+        "linestyle": CURVE_LINES[index],
+        "markerfacecolor": "white",
+        "markeredgewidth": 1.5,
+    }
 
 
 METHODS = {
@@ -224,7 +225,7 @@ def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
         groups.setdefault(tuple(row.get(k) for k in keys), []).append(row)
     summaries = []
     for key, group in groups.items():
-        out = dict(zip(keys, key))
+        out = {k: v for k, v in zip(keys, key)}
         out["replications"] = len(group)
         reps = [r.get("rep") for r in group]
         if all(r is not None for r in reps) and len(set(reps)) != len(reps):
@@ -234,7 +235,7 @@ def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
             vals = np.asarray([number(r.get(col)) for r in group])
             if col in {"set_cover", "target_cover"} and not np.isfinite(vals).all():
                 raise ValueError(
-                    f"Missing {col} in group {out}; coverage denominators must include every replication"
+                    f"Missing {col} in group {out}; coverage denominators must include every replication",  # noqa: E501
                 )
             if col == "primitive_cover":
                 vals = np.where(np.isfinite(vals), vals, 0.0)
@@ -361,7 +362,7 @@ class Report:
         text.extend(" & ".join(row) + r" \\" for row in body)
         if not body:
             text.append(
-                rf"\multicolumn{{{len(headers)}}}{{c}}{{No archived records for this comparison.}} \\"
+                rf"\multicolumn{{{len(headers)}}}{{c}}{{No archived records for this comparison.}} \\"  # noqa: E501
             )
         text.extend([r"\bottomrule", r"\end{tabular}", ""])
         path = self.tables / f"{name}.tex"

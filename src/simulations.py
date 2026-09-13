@@ -12,7 +12,16 @@ SAMPLE_SIZES = (50, 100, 250, 500, 1000, 2500, 10000)
 CAP_SIZES = (50, 250, 1000, 2500, 10000)
 
 
-def rng(seed, *keys):
+def rng(seed: int, *keys: int) -> np.random.Generator:
+    """Generate a random number generator.
+
+    Args:
+        seed (int): The seed for the random number generator.
+        keys (int): The keys for the random number generator.
+
+    Returns:
+        np.random.Generator: The random number generator.
+    """
     return np.random.default_rng(np.random.SeedSequence([int(seed), *map(int, keys)]))
 
 
@@ -125,7 +134,13 @@ def primary_job(job):
         truth = {k: m.exact_population(pop, k) for k in KINDS}
         cell, y, y0 = draw(pop, 1000, cfg, 10, int(100 * rescue), rep, arm)
         F = m.features(cell, y, 5)
-        key = dict(design="finite", rescue=rescue, arm=arm, n=1000, rep=rep)
+        key = {
+            "design": "finite",
+            "rescue": rescue,
+            "arm": arm,
+            "n": 1000,
+            "rep": rep,
+        }
         counts += moments(cell, y, y0, key)
         H = m.calibration_matrix(5)
         dc = H @ (pop["p"] * pop["tau"])
@@ -142,7 +157,11 @@ def primary_job(job):
             methods = ("cp", "kl", "eb", "hoeffding", "wald") if kind == "budget" else ("cp",)
             for method in methods:
                 mean, lo, hi, al, au = m.cell_region(F, method)
-                kw = dict(gamma=None if kind == "delta" else 0.2, aggregate_lo=al, aggregate_hi=au)
+                kw = {
+                    "gamma": None if kind == "delta" else 0.2,
+                    "aggregate_lo": al,
+                    "aggregate_hi": au,
+                }
                 if kind == "delta":
                     kw["effect_upper"] = np.full(5, 0.2)
                 if kind == "calibrated":
@@ -200,10 +219,10 @@ def primary_job(job):
         mean, lo, hi, al, au = m.cell_region(F, "cp", alpha=0.025)
         rr = m.region(mean, lo, hi, 5, aggregate_lo=al, aggregate_hi=au)
         cp_failure = int(any(z.status != "ok" for z in rr))
-        pair[arm] = dict(
-            cp=[0.0, 1.0] if cp_failure else [z.value for z in rr],
-            aggregate_cp=m.endpoint_cp(cell, y, 5, "budget", 0.025),
-            bootstrap=m.bootstrap_budget(
+        pair[arm] = {
+            "cp": [0.0, 1.0] if cp_failure else [z.value for z in rr],
+            "aggregate_cp": m.endpoint_cp(cell, y, 5, "budget", 0.025),
+            "bootstrap": m.bootstrap_budget(
                 cell,
                 y,
                 5,
@@ -211,10 +230,10 @@ def primary_job(job):
                 cfg["bootstrap_resamples"],
                 0.025,
             ),
-            truth=truth["budget"],
-            theta=pop["theta"],
-            failure=cp_failure,
-        )
+            "truth": truth["budget"],
+            "theta": pop["theta"],
+            "failure": cp_failure,
+        }
     for method in ("cp", "aggregate_cp", "bootstrap"):
         L = pair[1][method][0] - pair[0][method][1]
         U = pair[1][method][1] - pair[0][method][0]
@@ -227,23 +246,23 @@ def primary_job(job):
         if failure or not np.isfinite(L + U) or L > U:
             L, U, failure = -1.0, 1.0, 1
         contrasts.append(
-            dict(
-                rescue=rescue,
-                n=1000,
-                rep=rep,
-                method=method,
-                lower=L,
-                upper=U,
-                population_lower=tl,
-                population_upper=tu,
-                theta=target,
-                length=U - L,
-                sharp_width=tu - tl,
-                enlargement=U - L - tu + tl,
-                set_cover=int(L <= tl + 1e-10 and U >= tu - 1e-10),
-                target_cover=int(L <= target <= U),
-                failure=failure,
-            )
+            {
+                "rescue": rescue,
+                "n": 1000,
+                "rep": rep,
+                "method": method,
+                "lower": L,
+                "upper": U,
+                "population_lower": tl,
+                "population_upper": tu,
+                "theta": target,
+                "length": U - L,
+                "sharp_width": tu - tl,
+                "enlargement": U - L - tu + tl,
+                "set_cover": int(L <= tl + 1e-10 and U >= tu - 1e-10),
+                "target_cover": int(L <= target <= U),
+                "failure": failure,
+            }
         )
     return {
         "core/interval_replications.csv": raw,
@@ -261,7 +280,13 @@ def finite_job(job):
     family = {"sample_size": 20, "states12": 22, "active_caps": 23}[task]
     cell, y, y0 = draw(pop, n, cfg, family, n, rep)
     F = m.features(cell, y, 5)
-    key = dict(design=task, rescue=rescue, arm=0, n=n, rep=rep)
+    key = {
+        "design": task,
+        "rescue": rescue,
+        "arm": 0,
+        "n": n,
+        "rep": rep,
+    }
     kw, extra = {}, {}
     if kind == "calibrated":
         H = m.calibration_matrix(5)
@@ -325,22 +350,26 @@ def external_job(job):
             hh = H
             for group in range(2):
                 scores.append(
-                    dict(
-                        rep=rep,
-                        n_external=nex,
-                        group=group,
-                        score_mean=Z[:, group].mean(),
-                        score_variance=Z[:, group].var(ddof=1),
-                        lower=dl[group],
-                        upper=du[group],
-                        population_target=dt[group],
-                    )
+                    {
+                        "rep": rep,
+                        "n_external": nex,
+                        "group": group,
+                        "score_mean": Z[:, group].mean(),
+                        "score_variance": Z[:, group].var(ddof=1),
+                        "lower": dl[group],
+                        "upper": du[group],
+                        "population_target": dt[group],
+                    }
                 )
         rr = m.region(mean, lo, hi, 5, H=hh, dlo=dl, dhi=du, aggregate_lo=al, aggregate_hi=au)
         tt = m.exact_population(pop, "budget") if nex == 0 else truth
         record(
             rows,
-            dict(experiment="external", setting=nex, rep=rep),
+            {
+                "experiment": "external",
+                "setting": nex,
+                "rep": rep,
+            },
             "calibrated" if nex else "budget",
             "cp_eb",
             [z.value for z in rr],
@@ -352,7 +381,16 @@ def external_job(job):
         "core/external_radius_replications.csv": rows,
         "core/external_scores.csv": scores,
         "core/finite_counts.csv": moments(
-            cell, y, y0, dict(design="external", rescue=0.5, arm=0, n=1000, rep=rep)
+            cell,
+            y,
+            y0,
+            {
+                "design": "external",
+                "rescue": 0.5,
+                "arm": 0,
+                "n": 1000,
+                "rep": rep,
+            },
         ),
     }
 
@@ -370,7 +408,13 @@ def radius_job(job):
         gamma = param if is_grid else gt * param
         tl, tu = m.signed_budget_exact(pop["mu"], pop["p"], pop["b"], gamma)
         rr = m.region(mean, lo, hi, 5, gamma=gamma, aggregate_lo=al, aggregate_hi=au, refine=False)
-        key = dict(n=n, rep=rep, gamma=gamma, true_norm=gt, model_contains_truth=int(gamma >= gt))
+        key = {
+            "n": n,
+            "rep": rep,
+            "gamma": gamma,
+            "true_norm": gt,
+            "model_contains_truth": int(gamma >= gt),
+        }
         if not is_grid:
             key.update(experiment="radius", setting=param)
         record(
@@ -390,7 +434,13 @@ def radius_job(job):
             cell,
             y,
             y0,
-            dict(design="gamma" if is_grid else "radius", rescue=0.5, arm=0, n=n, rep=rep),
+            {
+                "design": "gamma" if is_grid else "radius",
+                "rescue": 0.5,
+                "arm": 0,
+                "n": n,
+                "rep": rep,
+            },
         ),
     }
 
@@ -406,31 +456,33 @@ def rare_job(job):
         boot = (
             rng(cfg["bootstrap_seed"], 40, ei, rep).binomial(n, ph, cfg["bootstrap_resamples"]) / n
         )
-        upper = dict(
-            cp=float(m.cp_counts(k, n)[1]),
-            kl=m.kl_counts_scalar(k, n)[1],
-            eb=min(1.0, ph + np.sqrt(2 * var * np.log(80) / n) + 7 * np.log(80) / (3 * (n - 1))),
-            hoeffding=min(1.0, ph + np.sqrt(np.log(40) / (2 * n))),
-            wald=min(1.0, ph + norm.ppf(0.975) * np.sqrt(var / n)),
-            bootstrap=min(1.0, ph + max(0.0, float(np.quantile(ph - boot, 0.95, method="higher")))),
-        )
+        upper = {
+            "cp": float(m.cp_counts(k, n)[1]),
+            "kl": m.kl_counts_scalar(k, n)[1],
+            "eb": min(1.0, ph + np.sqrt(2 * var * np.log(80) / n) + 7 * np.log(80) / (3 * (n - 1))),
+            "hoeffding": min(1.0, ph + np.sqrt(np.log(40) / (2 * n))),
+            "wald": min(1.0, ph + norm.ppf(0.975) * np.sqrt(var / n)),
+            "bootstrap": min(
+                1.0, ph + max(0.0, float(np.quantile(ph - boot, 0.95, method="higher")))
+            ),
+        }
         for method, up in upper.items():
             rows.append(
-                dict(
-                    expected_count=expected,
-                    n=n,
-                    rep=rep,
-                    method=method,
-                    count=k,
-                    population_lower=0.0,
-                    population_upper=p,
-                    lower=0.0,
-                    upper=up,
-                    set_cover=int(up >= p),
-                    upper_mass=up,
-                    empty_rare=int(k == 0),
-                    failure=0,
-                )
+                {
+                    "expected_count": expected,
+                    "n": n,
+                    "rep": rep,
+                    "method": method,
+                    "count": k,
+                    "population_lower": 0.0,
+                    "population_upper": p,
+                    "lower": 0.0,
+                    "upper": up,
+                    "set_cover": int(up >= p),
+                    "upper_mass": up,
+                    "empty_rare": int(k == 0),
+                    "failure": 0,
+                }
             )
     return {"core/rare_replications.csv": rows}
 
@@ -466,46 +518,46 @@ def deterministic_audits(cfg):
             pop = population(rescue, arm)
             for lam in (1.0, 1.25, 1.5, 2.0):
                 tanaudit.append(
-                    dict(
-                        rescue=rescue,
-                        arm=arm,
-                        Lambda=lam,
-                        max_difference=m.tan_lp_audit(pop, lam),
-                        minimum_true_lambda=m.tan_minimum_lambda(pop),
-                    )
+                    {
+                        "rescue": rescue,
+                        "arm": arm,
+                        "Lambda": lam,
+                        "max_difference": m.tan_lp_audit(pop, lam),
+                        "minimum_true_lambda": m.tan_minimum_lambda(pop),
+                    }
                 )
             for kind in KINDS:
                 L, U = m.exact_population(pop, kind)
                 truths.append(
-                    dict(
-                        design="finite",
-                        rescue=rescue,
-                        arm=arm,
-                        kind=kind,
-                        lower=L,
-                        upper=U,
-                        sharp_width=U - L,
-                        theta=pop["theta"],
-                        mu=pop["mu"],
-                        gamma_true=float(np.sqrt(pop["p"] @ (pop["tau"] ** 2))),
-                        minimum_true_lambda=m.tan_minimum_lambda(pop),
-                    )
+                    {
+                        "design": "finite",
+                        "rescue": rescue,
+                        "arm": arm,
+                        "kind": kind,
+                        "lower": L,
+                        "upper": U,
+                        "sharp_width": U - L,
+                        "theta": pop["theta"],
+                        "mu": pop["mu"],
+                        "gamma_true": float(np.sqrt(pop["p"] @ (pop["tau"] ** 2))),
+                        "minimum_true_lambda": m.tan_minimum_lambda(pop),
+                    }
                 )
             for j in range(5):
                 popmom.append(
-                    dict(
-                        design="finite",
-                        rescue=rescue,
-                        arm=arm,
-                        cell=j,
-                        p=pop["p"][j],
-                        b=pop["b"][j],
-                        tau=pop["tau"][j],
-                        mu=pop["mu"],
-                        theta=pop["theta"],
-                        b0=pop["b0"],
-                        alpha=pop["alpha"],
-                    )
+                    {
+                        "design": "finite",
+                        "rescue": rescue,
+                        "arm": arm,
+                        "cell": j,
+                        "p": pop["p"][j],
+                        "b": pop["b"][j],
+                        "tau": pop["tau"][j],
+                        "mu": pop["mu"],
+                        "theta": pop["theta"],
+                        "b0": pop["b0"],
+                        "alpha": pop["alpha"],
+                    }
                 )
     for design, pop, kind, res in (
         ("sample_size", population(), "calibrated", 0.5),
@@ -514,33 +566,33 @@ def deterministic_audits(cfg):
     ):
         L, U = m.exact_population(pop, kind)
         truths.append(
-            dict(
-                design=design,
-                rescue=res,
-                arm=0,
-                kind=kind,
-                lower=L,
-                upper=U,
-                sharp_width=U - L,
-                theta=pop["theta"],
-                mu=pop["mu"],
-                gamma_true=float(np.sqrt(pop["p"] @ (pop["tau"] ** 2))),
-                aggregate_width=min(0.2 * np.sqrt(pop["p"].sum()), 1 - pop["mu"]),
-            )
+            {
+                "design": design,
+                "rescue": res,
+                "arm": 0,
+                "kind": kind,
+                "lower": L,
+                "upper": U,
+                "sharp_width": U - L,
+                "theta": pop["theta"],
+                "mu": pop["mu"],
+                "gamma_true": float(np.sqrt(pop["p"] @ (pop["tau"] ** 2))),
+                "aggregate_width": min(0.2 * np.sqrt(pop["p"].sum()), 1 - pop["mu"]),
+            }
         )
         for j in range(5):
             popmom.append(
-                dict(
-                    design=design,
-                    rescue=res,
-                    arm=0,
-                    cell=j,
-                    p=pop["p"][j],
-                    b=pop["b"][j],
-                    tau=pop["tau"][j],
-                    mu=pop["mu"],
-                    theta=pop["theta"],
-                )
+                {
+                    "design": design,
+                    "rescue": res,
+                    "arm": 0,
+                    "cell": j,
+                    "p": pop["p"][j],
+                    "b": pop["b"][j],
+                    "tau": pop["tau"][j],
+                    "mu": pop["mu"],
+                    "theta": pop["theta"],
+                }
             )
     files.update(
         {
@@ -552,41 +604,54 @@ def deterministic_audits(cfg):
     pop, curves, meshrows = population(), [], []
     for gamma in np.linspace(0, 0.35, 36):
         L, U = m.signed_budget_exact(pop["mu"], pop["p"], pop["b"], gamma)
-        curves.append(dict(model="budget", parameter=gamma, lower=float(L), upper=float(U[0])))
+        curves.append(
+            {
+                "model": "budget",
+                "parameter": gamma,
+                "lower": float(L),
+                "upper": float(U[0]),
+            }
+        )
     for lam in np.linspace(1, 2.5, 31):
         L, U = m.tan_population(pop, lam)
-        curves.append(dict(model="tan", parameter=lam, lower=L, upper=U))
+        curves.append(
+            {
+                "model": "tan",
+                "parameter": lam,
+                "lower": L,
+                "upper": U,
+            }
+        )
     v = np.r_[pop["mu"], pop["p"], pop["b"]]
     for h in (1 / 8, 1 / 16, 1 / 32, 1 / 64, 1 / 128):
         rr = m.region(v, v, v, 5, mesh=h, refine=False)
         inn = m.region(v, v, v, 5, mesh=h, inner=True, refine=False)
         meshrows.append(
-            dict(
-                mesh=h,
-                budget_error=h * h / 4,
-                outer_lower=rr[0].value,
-                outer_upper=rr[1].value,
-                inner_lower=inn[0].primal_value,
-                inner_upper=inn[1].primal_value,
-                bracket_gap=max(
+            {
+                "mesh": h,
+                "budget_error": h * h / 4,
+                "outer_lower": rr[0].value,
+                "outer_upper": rr[1].value,
+                "inner_lower": inn[0].primal_value,
+                "inner_upper": inn[1].primal_value,
+                "bracket_gap": max(
                     inn[0].primal_value - rr[0].value, rr[1].value - inn[1].primal_value
                 ),
-                inner_violation=max(z.violation for z in inn),
-                inner_witness_checked=int(
+                "inner_violation": max(z.violation for z in inn),
+                "inner_witness_checked": int(
                     all(z.status == "ok" and z.violation <= 1e-9 for z in inn)
                 ),
-                dual_gap=max(z.dual_gap for z in rr),
-            )
+                "dual_gap": max(z.dual_gap for z in rr),
+            }
         )
     files["core/sensitivity_curves.csv"] = curves
     files["core/mesh_audit.csv"] = meshrows
     files["core/relaxation_audit.csv"] = [
-        dict(
-            sharp_budget_width=m.exact_population(pop, "budget")[1] - pop["mu"],
-            independent_budget_width=float(
+        {
+            "sharp_budget_width": m.exact_population(pop, "budget")[1] - pop["mu"],
+            "independent_budget_width": float(
                 np.minimum(pop["p"] - pop["b"], 0.2 * np.sqrt(pop["p"])).sum()
             ),
-        )
+        }
     ]
-    return files
     return files

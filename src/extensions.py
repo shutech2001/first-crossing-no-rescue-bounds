@@ -3,13 +3,13 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 from scipy.special import expit, ndtr, ndtri
 from scipy.stats import norm
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier  # type: ignore
+from sklearn.model_selection import StratifiedKFold  # type: ignore
 
 import methods as fm
 
@@ -47,31 +47,31 @@ def preparation_jobs(config) -> Iterable[dict]:
     """One counted reference task for each selected independent population law."""
     selected = _suites(config)
     if "observational" in selected:
-        yield dict(
-            suite="prepare_observational",
-            key="reference_observational",
-            id="reference_observational",
-            config=config,
-        )
+        yield {
+            "suite": "prepare_observational",
+            "key": "reference_observational",
+            "id": "reference_observational",
+            "config": config,
+        }
     if "continuous" in selected:
         for ci, (K, d, rho) in enumerate(CONTINUOUS_CONFIGS):
-            yield dict(
-                suite="prepare_continuous",
-                key=f"reference_continuous_{ci}",
-                id=f"reference_continuous_{ci}",
-                ci=ci,
-                K=K,
-                d=d,
-                rho=rho,
-                config=config,
-            )
+            yield {
+                "suite": "prepare_continuous",
+                "key": f"reference_continuous_{ci}",
+                "id": f"reference_continuous_{ci}",
+                "ci": ci,
+                "K": K,
+                "d": d,
+                "rho": rho,
+                "config": config,
+            }
     if "partitions" in selected:
-        yield dict(
-            suite="prepare_partitions",
-            key="reference_partitions",
-            id="reference_partitions",
-            config=config,
-        )
+        yield {
+            "suite": "prepare_partitions",
+            "key": "reference_partitions",
+            "id": "reference_partitions",
+            "config": config,
+        }
 
 
 def prepare_extensions(config):
@@ -91,44 +91,44 @@ def extension_jobs(config, context) -> Iterable[dict]:
         for scenario in ("linear", "nonlinear"):
             for n in config.get("observational_sizes", OBS_SIZES):
                 for rep in range(config.get("observational_reps", 250)):
-                    yield dict(
-                        suite="observational",
-                        key=f"observational_{scenario}_{n}_{rep}",
-                        id=f"observational_{scenario}_{n}_{rep}",
-                        scenario=scenario,
-                        n=n,
-                        rep=rep,
-                        pop=context["observational"],
-                        config=config,
-                    )
+                    yield {
+                        "suite": "observational",
+                        "key": f"observational_{scenario}_{n}_{rep}",
+                        "id": f"observational_{scenario}_{n}_{rep}",
+                        "scenario": scenario,
+                        "n": n,
+                        "rep": rep,
+                        "pop": context["observational"],
+                        "config": config,
+                    }
     if "continuous" in selected:
         for ci, (K, d, rho) in enumerate(CONTINUOUS_CONFIGS):
             for rep in range(config.get("continuous_reps", 250)):
-                yield dict(
-                    suite="continuous",
-                    key=f"continuous_{ci}_{rep}",
-                    ci=ci,
-                    K=K,
-                    d=d,
-                    id=f"continuous_{ci}_{rep}",
-                    rho=rho,
-                    n=config.get("continuous_n", 1000),
-                    rep=rep,
-                    pop=context[f"continuous_{ci}"],
-                    config=config,
-                )
+                yield {
+                    "suite": "continuous",
+                    "key": f"continuous_{ci}_{rep}",
+                    "ci": ci,
+                    "K": K,
+                    "d": d,
+                    "id": f"continuous_{ci}_{rep}",
+                    "rho": rho,
+                    "n": config.get("continuous_n", 1000),
+                    "rep": rep,
+                    "pop": context[f"continuous_{ci}"],
+                    "config": config,
+                }
     if "partitions" in selected:
         for n in config.get("partition_sizes", PART_SIZES):
             for rep in range(config.get("partition_reps", 250)):
-                yield dict(
-                    suite="partitions",
-                    key=f"partitions_{n}_{rep}",
-                    n=n,
-                    rep=rep,
-                    id=f"partitions_{n}_{rep}",
-                    pop=context["partitions"],
-                    config=config,
-                )
+                yield {
+                    "suite": "partitions",
+                    "key": f"partitions_{n}_{rep}",
+                    "n": n,
+                    "rep": rep,
+                    "id": f"partitions_{n}_{rep}",
+                    "pop": context["partitions"],
+                    "config": config,
+                }
 
 
 def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6, supported=False):
@@ -178,7 +178,14 @@ def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6, supported=False):
     )
     q0 = expit(eta)
     shift = np.where(T < K, 0.7 * (1 + 0.50 * (K - 1 - T) / K + 0.25 * exceedance), 0)
-    return dict(W=W, T=T, ex=exceedance, qR=expit(eta - shift), q0=q0, max_centered=max_centered)
+    return {
+        "W": W,
+        "T": T,
+        "ex": exceedance,
+        "qR": expit(eta - shift),
+        "q0": q0,
+        "max_centered": max_centered,
+    }
 
 
 def _continuous_cells(dat, K):
@@ -195,12 +202,12 @@ def _calibration(config, suite, ci=0, K=5, d=5, rho=0.35):
     dat = continuous_paths(n, _rng(master, 1, suite, ci), K=K, d=d, rho=rho, c0=0)
     maxima = dat["max_centered"]
     c0 = float(np.median(maxima))
-    return c0, dict(
-        calibration_n=n,
-        calibration_rescue=float(np.mean(maxima >= c0)),
-        calibration_seed=master,
-        calibration_stream=json.dumps([1, suite, ci]),
-    )
+    return c0, {
+        "calibration_n": n,
+        "calibration_rescue": float(np.mean(maxima >= c0)),
+        "calibration_seed": master,
+        "calibration_stream": json.dumps([1, suite, ci]),
+    }
 
 
 def _batch_sizes(config):
@@ -214,13 +221,13 @@ def _batch_sizes(config):
 
 def _moments(cell, qr, q0, M):
     n = len(cell)
-    return dict(
-        p=np.bincount(cell, minlength=M + 1)[:M] / n,
-        b=np.bincount(cell, weights=qr, minlength=M + 1)[:M] / n,
-        t=np.bincount(cell, weights=q0 - qr, minlength=M + 1)[:M] / n,
-        mu=float(np.mean(qr)),
-        theta=float(np.mean(q0)),
-    )
+    return {
+        "p": np.bincount(cell, minlength=M + 1)[:M] / n,
+        "b": np.bincount(cell, weights=qr, minlength=M + 1)[:M] / n,
+        "t": np.bincount(cell, weights=q0 - qr, minlength=M + 1)[:M] / n,
+        "mu": float(np.mean(qr)),
+        "theta": float(np.mean(q0)),
+    }
 
 
 def _wide_moments(pop):
@@ -421,16 +428,16 @@ def _run_preparation_job(job):
                 for M in PARTITIONS:
                     r = lookup[(cap, M, bi)]
                     contrasts.append(
-                        dict(
-                            cap=cap,
-                            M=M,
-                            reference_M=80,
-                            batch=bi,
-                            n=n,
-                            lower_difference=r["lower"] - fine["lower"],
-                            upper_difference=r["upper"] - fine["upper"],
-                            width_difference=r["sharp_width"] - fine["sharp_width"],
-                        )
+                        {
+                            "cap": cap,
+                            "M": M,
+                            "reference_M": 80,
+                            "batch": bi,
+                            "n": n,
+                            "lower_difference": r["lower"] - fine["lower"],
+                            "upper_difference": r["upper"] - fine["upper"],
+                            "width_difference": r["sharp_width"] - fine["sharp_width"],
+                        }
                     )
         for row in rows:
             fine = next(r for r in rows if (r["cap"], r["M"]) == (row["cap"], 80))
@@ -438,7 +445,7 @@ def _run_preparation_job(job):
             row["coarsening_gap"] = row["upper"] - fine["upper"]
             row["coarsening_gap_mcse"] = _batch_se(group, "upper_difference")
         serializable_pops = {f"{cap}:{M}": pop for (cap, M), pop in totals.items()}
-        return {"partitions": dict(c0=c0, pops=serializable_pops)}, {
+        return {"partitions": {"c0": c0, "pops": serializable_pops}}, {
             "partition_oracles.csv": rows,
             "partition_oracle_batches.csv": records,
             "partition_oracle_paired_contrasts.csv": contrasts,
@@ -564,19 +571,19 @@ def _continuous_job(job):
     uniform = _rng(master, 2, ci, n, rep, 1).random(n)
     y = (uniform < dat["qR"]).astype(float)
     cell = _continuous_cells(dat, K)
-    key = dict(
-        design=f"continuous_K{K}_d{d}_rho{rho}",
-        ci=ci,
-        K=K,
-        d=d,
-        rho=rho,
-        rescue=0.5,
-        arm=0,
-        n=n,
-        rep=rep,
-        seed=master,
-        rng_stream=json.dumps([2, ci, n, rep]),
-    )
+    key = {
+        "design": f"continuous_K{K}_d{d}_rho{rho}",
+        "ci": ci,
+        "K": K,
+        "d": d,
+        "rho": rho,
+        "rescue": 0.5,
+        "arm": 0,
+        "n": n,
+        "rep": rep,
+        "seed": master,
+        "rng_stream": json.dumps([2, ci, n, rep]),
+    }
     rows, moments = [], []
     for method in ("cp", "kl", "eb", "wald"):
         try:
@@ -608,7 +615,14 @@ def _partition_job(job):
         y = (uniform < qr).astype(float)
         for M in PARTITIONS:
             pop = reference["pops"][f"{cap}:{M}"]
-            key = dict(n=n, rep=rep, cap=cap, M=M, seed=master, rng_stream=json.dumps([3, n, rep]))
+            key = {
+                "n": n,
+                "rep": rep,
+                "cap": cap,
+                "M": M,
+                "seed": master,
+                "rng_stream": json.dumps([3, n, rep]),
+            }
             try:
                 row, mr = _unweighted_analysis(labels[M], y, M, pop, "cp", key, config, False)
                 moments.extend(mr)
@@ -666,9 +680,14 @@ def _draw_observational(pop, n, scenario, path_rng, outcome_rng):
         )
         qr[ii], qnr[ii] = q[np.arange(len(ii)), selected], q0[np.arange(len(ii)), selected]
     uniform = outcome_rng.random(n)
-    return dict(
-        W=W, A=A, e=e, cell=cell, y=(uniform < qr).astype(float), ynr=(uniform < qnr).astype(float)
-    )
+    return {
+        "W": W,
+        "A": A,
+        "e": e,
+        "cell": cell,
+        "y": (uniform < qr).astype(float),
+        "ynr": (uniform < qnr).astype(float),
+    }
 
 
 def _ipw_analysis(dat, pop, name, propensity, fit, bound, key, config):
@@ -778,27 +797,33 @@ def _observational_job(job):
         population, n, scenario, _rng(master, 1, si, n, rep, 0), _rng(master, 1, si, n, rep, 1)
     )
     target = population["pops"]["0"]
-    key = dict(scenario=scenario, n=n, rep=rep, seed=master, rng_stream=json.dumps([1, si, n, rep]))
+    key = {
+        "scenario": scenario,
+        "n": n,
+        "rep": rep,
+        "seed": master,
+        "rng_stream": json.dumps([1, si, n, rep]),
+    }
     fits, errors, diagnostics = {}, {}, []
     for name, interactions in (("logit", True), ("main", False)):
         try:
             e, eraw, X, info, beta = fm.fitted_logit(dat["W"], dat["A"], interactions)
             fits[name] = (e, (eraw, X, info, beta))
             diagnostics.append(
-                dict(
+                {
                     **key,
-                    nuisance=name,
-                    failure=0,
-                    max_coefficient=float(np.max(np.abs(beta))),
-                    max_score=float(np.max(np.abs(X.T @ (dat["A"] - eraw) / n))),
-                    information_condition=float(np.linalg.cond(info)),
-                    clip_fraction=float(np.mean((eraw < 0.02) | (eraw > 0.98))),
-                    coefficients=json.dumps(beta.tolist()),
-                )
+                    "nuisance": name,
+                    "failure": 0,
+                    "max_coefficient": float(np.max(np.abs(beta))),
+                    "max_score": float(np.max(np.abs(X.T @ (dat["A"] - eraw) / n))),
+                    "information_condition": float(np.linalg.cond(info)),
+                    "clip_fraction": float(np.mean((eraw < 0.02) | (eraw > 0.98))),
+                    "coefficients": json.dumps(beta.tolist()),
+                }
             )
         except Exception as exc:
             errors[name] = f"{type(exc).__name__}: {exc}"
-            diagnostics.append(dict(**key, nuisance=name, failure=1, reason=errors[name]))
+            diagnostics.append({**key, "nuisance": name, "failure": 1, "reason": errors[name]})
     split_seed = _int_seed(forest_master, 1, si, n, rep)
     forest_seeds = [_int_seed(forest_master, 2, si, n, rep, fold) for fold in (0, 1)]
     try:
@@ -821,17 +846,17 @@ def _observational_job(job):
             ]
         fits["rf"] = (np.clip(predictions, 0.02, 0.98), None)
         diagnostics.append(
-            dict(
+            {
                 **key,
-                nuisance="rf",
-                failure=0,
-                forest_seed=forest_master,
-                split_seed=split_seed,
-                fold0_seed=forest_seeds[0],
-                fold1_seed=forest_seeds[1],
-                forest_trees=int(config.get("forest_trees", 200)),
-                clip_fraction=float(np.mean((predictions < 0.02) | (predictions > 0.98))),
-            )
+                "nuisance": "rf",
+                "failure": 0,
+                "forest_seed": forest_master,
+                "split_seed": split_seed,
+                "fold0_seed": forest_seeds[0],
+                "fold1_seed": forest_seeds[1],
+                "forest_trees": int(config.get("forest_trees", 200)),
+                "clip_fraction": float(np.mean((predictions < 0.02) | (predictions > 0.98))),
+            }
         )
     except Exception as exc:
         errors["rf"] = f"{type(exc).__name__}: {exc}"

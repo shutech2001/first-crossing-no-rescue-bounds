@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import gzip
 import hashlib
 import json
@@ -9,11 +10,24 @@ import multiprocessing
 import os
 import shutil
 import tempfile
+from collections.abc import Callable, Generator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
+import numpy as np
+from threadpoolctl import threadpool_limits  # type: ignore
 from tqdm import tqdm
+
+from extensions import (
+    extension_jobs,
+    preparation_jobs,
+    run_extension_job,
+    run_preparation_job,
+)
+from report_experiments import generate_reports
+from simulations import core_jobs, deterministic_audits, run_core_job
 
 SRC_DIR = Path(__file__).resolve().parent
 ROOT = SRC_DIR.parent
@@ -25,13 +39,19 @@ COMPUTATION_FILES = (
     "extensions.py",
 )
 RESULT_DIRECTORIES = ("core", "gamma", "continuous", "observational", "partitions")
+_THREAD_LIMITS: threadpool_limits | None = None
 
 
 @contextmanager
-def output_lock(out):
-    """Lock the output directory without leaving a lock file in it."""
-    import fcntl
+def output_lock(out: Path) -> Generator:
+    """Lock the output directory without leaving a lock file in it.
 
+    Args:
+        out (Path): The output directory.
+
+    Yields:
+        Generator: A context manager that locks the output directory.
+    """
     fd = os.open(out, os.O_RDONLY)
     try:
         try:
@@ -43,19 +63,35 @@ def output_lock(out):
         os.close(fd)
 
 
-def has_saved_results(out):
+def has_saved_results(out: Path) -> bool:
+    """Check if there are any saved results in the output directory.
+
+    Args:
+        out (Path): The output directory.
+
+    Returns:
+        bool: True if there are any saved results, False otherwise.
+    """
     return any(any((out / name).glob("*.csv")) for name in RESULT_DIRECTORIES)
 
 
-def prepare_checkpoints(out, cfg):
-    """Keep resume identity only until the numerical results are saved."""
+def prepare_checkpoints(out: Path, cfg: dict) -> None:
+    """Keep resume identity only until the numerical results are saved.
+
+    Args:
+        out (Path): The output directory.
+        cfg (dict): The configuration dictionary.
+
+    Raises:
+        SystemExit: If the computational code or settings differ from the saved results.
+    """
     checkpoints = out / "checkpoints"
     control = checkpoints / "run.json"
     sources = {
         name: hashlib.sha256((SRC_DIR / name).read_bytes()).hexdigest()
         for name in COMPUTATION_FILES
     }
-    signature = stable_hash(dict(config=cfg, sources=sources))
+    signature = stable_hash({"config": cfg, "sources": sources})
     if control.exists():
         saved = json.loads(control.read_text())
         if saved.get("signature") != signature:
@@ -69,22 +105,40 @@ def prepare_checkpoints(out, cfg):
                 "Existing results found. Use --report-only to regenerate figures and "
                 "tables, or a new --out directory for another simulation run."
             )
-        atomic_json(control, dict(config=cfg, signature=signature))
+        atomic_json(control, {"config": cfg, "signature": signature})
 
 
 class StudyProgress(tqdm):
-    """Keep the accounting invariant even when rendering is disabled."""
+    """Keep the accounting invariant even when rendering is disabled.
 
-    def update(self, n=1):
+    Args:
+        tqdm: The progress bar.
+    """
+
+    def update(self, n: int = 1) -> None:
+        """Update the progress bar.
+
+        Args:
+            n (int): The number of units to update.
+
+        Returns:
+            None: The number of units updated.
+        """
         if self.disable:
             self.n += n
             return None
         return super().update(n)
 
 
-def json_default(value):
-    import numpy as np
+def json_default(value: Any) -> Any:
+    """Serialize a value to JSON.
 
+    Args:
+        value (Any): The value to serialize.
+
+    Returns:
+        Any: The serialized value.
+    """
     if isinstance(value, np.ndarray):
         return {"__ndarray__": value.tolist(), "dtype": str(value.dtype)}
     if isinstance(value, np.generic):
@@ -94,21 +148,42 @@ def json_default(value):
     raise TypeError(f"Cannot serialize {type(value)}")
 
 
-def json_hook(value):
-    if "__ndarray__" in value and "dtype" in value:
-        import numpy as np
+def json_hook(value: Any) -> Any:
+    """Deserialize a value from JSON.
 
+    Args:
+        value (Any): The value to deserialize.
+
+    Returns:
+        Any: The deserialized value.
+    """
+    if "__ndarray__" in value and "dtype" in value:
         return np.asarray(value["__ndarray__"], dtype=value["dtype"])
     return value
 
 
-def stable_hash(value):
+def stable_hash(value: Any) -> str:
+    """Compute a stable hash of a value.
+
+    Args:
+        value (Any): The value to hash.
+
+    Returns:
+        str: The stable hash.
+    """
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, default=json_default).encode()
     ).hexdigest()
 
 
-def atomic_json(path, value, compressed=False):
+def atomic_json(path: Path, value: Any, compressed: bool = False) -> None:
+    """Write a value to a JSON file atomically.
+
+    Args:
+        path (Path): The path to the JSON file.
+        value (Any): The value to write.
+        compressed (bool): Whether to compress the JSON file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     opener = gzip.open if compressed else open
@@ -118,35 +193,58 @@ def atomic_json(path, value, compressed=False):
     os.replace(tmp, path)
 
 
-def read_checkpoint(path):
+def read_checkpoint(path: Path) -> dict:
+    """Read a checkpoint from a JSON file.
+
+    Args:
+        path (Path): The path to the JSON file.
+
+    Returns:
+        dict: The checkpoint.
+    """
     with gzip.open(path, "rt", encoding="utf-8") as f:
         return json.load(f, object_hook=json_hook)
 
 
-def checkpoint_path(out, job):
+def checkpoint_path(out: Path, job: dict) -> Path:
+    """Compute the path to a checkpoint file.
+
+    Args:
+        out (Path): The output directory.
+        job (dict): The job dictionary.
+
+    Returns:
+        Path: The path to the checkpoint file.
+    """
     identifier = job["id"]
     if any(x in identifier for x in ("/", "\\", "..")):
         raise ValueError(f"Unsafe job id: {identifier}")
     return out / "checkpoints" / (identifier + ".json.gz")
 
 
-def worker_setup():
-    # One numerical thread per worker avoids worker-count-dependent oversubscription.
-    from threadpoolctl import threadpool_limits
+def worker_setup() -> None:
+    """Set up the worker environment.
 
+    This function sets the thread limit to 1 and the OMP_NUM_THREADS environment variable to 1.
+    """
+    # One numerical thread per worker avoids worker-count-dependent oversubscription.
     global _THREAD_LIMITS
     _THREAD_LIMITS = threadpool_limits(limits=1)
     os.environ["OMP_NUM_THREADS"] = "1"
 
 
-def execute_job(job):
-    if job.get("stage") == "audit":
-        from simulations import deterministic_audits
+def execute_job(job: dict) -> dict:
+    """Execute a job.
 
+    Args:
+        job (dict): The job dictionary.
+
+    Returns:
+        dict: The result of the job.
+    """
+    if job.get("stage") == "audit":
         context, files = {}, deterministic_audits(job["config"])
     elif job.get("stage") == "preparation":
-        from extensions import run_preparation_job
-
         context, files = run_preparation_job(job)
     elif job.get("task") in (
         "primary",
@@ -158,27 +256,37 @@ def execute_job(job):
         "gamma",
         "rare",
     ):
-        from simulations import run_core_job
-
         context, files = {}, run_core_job(job)
     else:
-        from extensions import run_extension_job
-
         context, files = {}, run_extension_job(job)
-    return dict(
-        id=job["id"],
-        weight=job.get("weight", 1),
-        stage=job.get("stage", "simulation"),
-        job_spec={
+    return {
+        "id": job["id"],
+        "weight": job.get("weight", 1),
+        "stage": job.get("stage", "simulation"),
+        "job_spec": {
             k: v for k, v in job.items() if k not in ("context", "config", "pop", "reference")
         },
-        context=context,
-        files=files,
-    )
+        "context": context,
+        "files": files,
+    }
 
 
-def run_jobs(jobs, out, workers, progress, on_complete=None):
-    """Bound in-flight jobs and write each successful replication atomically."""
+def run_jobs(
+    jobs: list[dict],
+    out: Path,
+    workers: int,
+    progress: StudyProgress,
+    on_complete: Callable[[dict], None] | None = None,
+) -> None:
+    """Bound in-flight jobs and write each successful replication atomically.
+
+    Args:
+        jobs (list[dict]): The jobs to run.
+        out (Path): The output directory.
+        workers (int): The number of workers to use.
+        progress (StudyProgress): The progress bar.
+        on_complete (Callable[[dict], None]): A callback function to call when a job is complete.
+    """
     pending = []
     for job in jobs:
         path = checkpoint_path(out, job)
@@ -245,18 +353,33 @@ def run_jobs(jobs, out, workers, progress, on_complete=None):
         executor.shutdown(wait=True)
 
 
-def csv_value(value):
+def csv_value(value: Any) -> str:
+    """Convert a value to a CSV-compatible string.
+
+    Args:
+        value (Any): The value to convert.
+
+    Returns:
+        str: The CSV-compatible string.
+    """
     if value is None:
         return ""
     if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, default=json_default, sort_keys=True)
-    return value
+        return json.dumps(value, default=json_default, sort_keys=True, indent=None)
+    return str(value)
 
 
-def materialize(out):
-    """Stream checkpoints into reproducible CSVs without loading the full study."""
+def materialize(out: Path) -> dict[str, int]:
+    """Stream checkpoints into reproducible CSVs without loading the full study.
+
+    Args:
+        out (Path): The output directory.
+
+    Returns:
+        dict[str, int]: The number of rows written for each schema.
+    """
     paths = sorted((out / "checkpoints").glob("*.json.gz"))
-    schemas = {}
+    schemas: dict[str, dict[str, str]] = {}
     # First pass collects union schemas (fallbacks can have additional fields).
     for path in paths:
         result = read_checkpoint(path)
@@ -298,7 +421,15 @@ def materialize(out):
     return row_counts
 
 
-def full_protocol(cfg):
+def full_protocol(cfg: dict) -> bool:
+    """Check if the configuration is a full protocol.
+
+    Args:
+        cfg (dict): The configuration dictionary.
+
+    Returns:
+        bool: True if the configuration is a full protocol, False otherwise.
+    """
     return (
         set(cfg["suites"]) == set(SUITES)
         and cfg["finite_reps"] >= 500
@@ -314,27 +445,35 @@ def full_protocol(cfg):
     )
 
 
-def make_config(args):
-    cfg = dict(
-        suites=list(SUITES) if args.suite == ["all"] else args.suite,
-        finite_reps=500,
-        rare_reps=20000,
-        observational_reps=250,
-        continuous_reps=250,
-        partition_reps=250,
-        bootstrap_resamples=999,
-        forest_trees=200,
-        oracle_n=2000000,
-        calibration_n=100000,
-        oracle_batches=20,
-        mesh=1 / 128,
-        rare_chunk=500,
-        seed=args.seed,
-        bootstrap_seed=args.seed * 10,
-        oracle_seed=args.seed * 100,
-        external_seed=args.seed * 1000,
-        forest_seed=args.seed * 10000,
-    )
+def make_config(args: argparse.Namespace) -> dict:
+    """Make a configuration dictionary from command line arguments.
+
+    Args:
+        args (argparse.Namespace): The command line arguments.
+
+    Returns:
+        dict: The configuration dictionary.
+    """
+    cfg = {
+        "suites": list(SUITES) if args.suite == ["all"] else args.suite,
+        "finite_reps": 500,
+        "rare_reps": 20000,
+        "observational_reps": 250,
+        "continuous_reps": 250,
+        "partition_reps": 250,
+        "bootstrap_resamples": 999,
+        "forest_trees": 200,
+        "oracle_n": 2000000,
+        "calibration_n": 100000,
+        "oracle_batches": 20,
+        "mesh": 1 / 128,
+        "rare_chunk": 500,
+        "seed": args.seed,
+        "bootstrap_seed": args.seed * 10,
+        "oracle_seed": args.seed * 100,
+        "external_seed": args.seed * 1000,
+        "forest_seed": args.seed * 10000,
+    }
     if args.smoke:
         cfg.update(
             finite_reps=2,
@@ -370,7 +509,15 @@ def make_config(args):
     return cfg
 
 
-def parse_args(argv=None):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments.
+
+    Args:
+        argv (list[str]): The command line arguments.
+
+    Returns:
+        argparse.Namespace: The parsed command line arguments.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--out",
@@ -438,7 +585,12 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    """Main function.
+
+    Args:
+        argv (list[str]): The command line arguments.
+    """
     args = parse_args(argv)
     out = args.out
     if args.report_only:
@@ -450,20 +602,21 @@ def main(argv=None):
                     "An incomplete simulation run has checkpoints. "
                     "Resume that run before regenerating reports."
                 )
-            from report_experiments import generate_reports
-
             generate_reports(out)
         print(f"Regenerated figures and TeX tables from saved results: {out}")
         return
     cfg = make_config(args)
-    from extensions import extension_jobs, preparation_jobs
-    from simulations import core_jobs
-
     prep = list(preparation_jobs(cfg))
     for i, job in enumerate(prep):
         job.setdefault("id", f"preparation_{i}")
         job.update(stage="preparation", weight=1)
-    audit = dict(id="deterministic_audits", stage="audit", suite="audits", weight=1, config=cfg)
+    audit = {
+        "id": "deterministic_audits",
+        "stage": "audit",
+        "suite": "audits",
+        "weight": 1,
+        "config": cfg,
+    }
     core = list(core_jobs(cfg))
     # Extension job count is known before references are calculated.
     extension_total = 8 * cfg["observational_reps"] if "observational" in cfg["suites"] else 0
@@ -473,12 +626,12 @@ def main(argv=None):
     if args.dry_run:
         print(
             json.dumps(
-                dict(
-                    config=cfg,
-                    workers=args.workers,
-                    progress_total=total,
-                    full_protocol=full_protocol(cfg),
-                ),
+                {
+                    "config": cfg,
+                    "workers": args.workers,
+                    "progress_total": total,
+                    "full_protocol": full_protocol(cfg),
+                },
                 indent=2,
             )
         )
@@ -518,8 +671,6 @@ def main(argv=None):
         shutil.rmtree(out / "checkpoints")
         if not args.no_report:
             print("Generating PDF figures and TeX tables from saved results...", flush=True)
-            from report_experiments import generate_reports
-
             generate_reports(out)
         print(f"{'Full study' if full_protocol(cfg) else 'Selected execution check'} saved: {out}")
 

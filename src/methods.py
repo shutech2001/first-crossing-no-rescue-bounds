@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import math
 import time
 from dataclasses import dataclass, replace
@@ -10,12 +11,17 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.optimize import brentq, linprog, minimize
 from scipy.special import expit, ndtr, ndtri, xlogy
 from scipy.stats import beta, norm
 
 MASTER = 42
 DEFAULT_MESH = 1 / 128
+SAMPLE_SIZES = [50, 100, 250, 500, 1000, 2500, 10000]
+OBS_SIZES = [50, 250, 1000, 10000]
+PART_SIZES = [250, 1000, 10000]
+PARTITIONS = [1, 5, 10, 20, 40, 80]
 
 
 def rng_for(*keys: int) -> np.random.Generator:
@@ -77,31 +83,31 @@ def finite_population(
             if k < K - 1:
                 tr = trans[k + 1]
                 A[k * J: (k + 1) * J, (k + 1) * (J + 1): (k + 2) * (J + 1)] = -tr  # fmt: skip
-                E[k * (J + 1): k * (J + 1) + J] = tr @ E[(k + 1) * (J + 1): (k + 2) * (J + 1)]  # fmt: skip
+                E[k * (J + 1): k * (J + 1) + J] = tr @ E[(k + 1) * (J + 1): (k + 2) * (J + 1)]  # fmt: skip # noqa: E501
         load = np.zeros(N)
         load[: J + 1] = masses[0]
         metric = np.concatenate(masses)
         Omega = E.T @ (metric[:, None] * E)
-        return dict(
-            p=p,
-            b=b,
-            mu=float(b.sum() + b0),
-            theta=float(b.sum() + b0 + p @ tau),
-            tau=tau,
-            qR=qr,
-            b0=b0,
-            alpha=al,
-            A=A,
-            E=E,
-            r=load,
-            G=metric,
-            Omega=Omega,
-            K=K,
-            J=J,
-            arm=a,
-            rescue=float(p.sum()),
-            p0=float(mass.sum()),
-        )
+        return {
+            "p": p,
+            "b": b,
+            "mu": float(b.sum() + b0),
+            "theta": float(b.sum() + b0 + p @ tau),
+            "tau": tau,
+            "qR": qr,
+            "b0": b0,
+            "alpha": al,
+            "A": A,
+            "E": E,
+            "r": load,
+            "G": metric,
+            "Omega": Omega,
+            "K": K,
+            "J": J,
+            "arm": a,
+            "rescue": float(p.sum()),
+            "p0": float(mass.sum()),
+        }
 
     if alpha is None:
         alpha = brentq(lambda x: (one(x, 0) + one(x, 1)) / 2 - rescue, -15, 15, xtol=1e-12)
@@ -120,7 +126,7 @@ def draw_finite(
     return cell, (u < q[cell]).astype(float), (u < q0[cell]).astype(float)
 
 
-def features(cell: np.ndarray, y: np.ndarray, M: int) -> np.ndarray:
+def features(cell: NDArray[np.int32], y: NDArray[np.float64], M: int) -> NDArray[np.float64]:
     z = (cell[:, None] == np.arange(M)[None, :]).astype(float)
     return np.column_stack([y, z, z * y[:, None]])
 
@@ -190,7 +196,11 @@ class Bound:
 
 
 def _rational_lower(
-    c: np.ndarray, A: np.ndarray, b: np.ndarray, bounds: list[tuple[float, float]], marg: np.ndarray
+    c: NDArray[np.float64],
+    A: NDArray[np.float64],
+    b: NDArray[np.float64],
+    bounds: list[tuple[float, float]],
+    marg: NDArray[np.float64],
 ) -> float:
     """A valid lower bound for min c'x on a bounded LP, independent of dual feasibility.
 
@@ -225,24 +235,24 @@ def _outward_add(a: float, b: float, direction: int) -> float:
 
 
 def solve_mass(
-    mean: np.ndarray,
-    lo: np.ndarray,
-    hi: np.ndarray,
+    mean: NDArray[np.float64],
+    lo: NDArray[np.float64],
+    hi: NDArray[np.float64],
     M: int,
     gamma: Optional[float] = 0.2,
     signed: bool = True,
-    H: Optional[np.ndarray] = None,
-    dlo: Optional[np.ndarray] = None,
-    dhi: Optional[np.ndarray] = None,
+    H: Optional[NDArray[np.float64]] = None,
+    dlo: Optional[NDArray[np.float64]] = None,
+    dhi: Optional[NDArray[np.float64]] = None,
     direction: int = 1,
     mesh: Optional[float] = None,
     inner: bool = False,
-    center: Optional[np.ndarray] = None,
+    center: Optional[NDArray[np.float64]] = None,
     certificate: bool = True,
-    aggregate_lo: Optional[np.ndarray] = None,
-    aggregate_hi: Optional[np.ndarray] = None,
-    effect_lower: Optional[np.ndarray] = None,
-    effect_upper: Optional[np.ndarray] = None,
+    aggregate_lo: Optional[NDArray[np.float64]] = None,
+    aggregate_hi: Optional[NDArray[np.float64]] = None,
+    effect_lower: Optional[NDArray[np.float64]] = None,
+    effect_upper: Optional[NDArray[np.float64]] = None,
     extra_linear: Optional[tuple] = None,
 ) -> Bound:
     """LP bracket of the mass-coordinate program; direction=+1 lower, -1 upper.
@@ -582,7 +592,8 @@ def geometry_audit() -> list[dict]:
             rH = np.divide(r, pop["G"], out=np.zeros_like(r), where=pop["G"] > 0)
             proj = E @ np.linalg.solve(gram, E.T @ (pop["G"] * rH))
             half2 = 0.1 * np.sqrt(np.sum(pop["G"] * proj**2))
-            # Independently solve range-intersected support functions in bridge vs continuation coordinates.
+            # Independently solve range-intersected support functions in bridge vs
+            # continuation coordinates.
             qc = pop["qR"]
             rho = 0.2
 
@@ -630,21 +641,21 @@ def geometry_audit() -> list[dict]:
             vc = [cc(1), cc(-1)]
             tc = time.perf_counter() - t
             rows.append(
-                dict(
-                    K=K,
-                    J=J,
-                    continuation_dim=K * (J + 1),
-                    bridge_dim=K,
-                    operator_residual=float(np.max(np.abs(A @ E))),
-                    loading_residual=float(np.max(np.abs(q - p))),
-                    halfwidth_difference=float(abs(half1 - half2)),
-                    constrained_endpoint_difference=float(
+                {
+                    "K": K,
+                    "J": J,
+                    "continuation_dim": K * (J + 1),
+                    "bridge_dim": K,
+                    "operator_residual": float(np.max(np.abs(A @ E))),
+                    "loading_residual": float(np.max(np.abs(q - p))),
+                    "halfwidth_difference": float(abs(half1 - half2)),
+                    "constrained_endpoint_difference": float(
                         max(abs(vb[i].fun - vc[i].fun) for i in range(2))
                     ),
-                    all_optimizers_success=all(x.success for x in vb + vc),
-                    bridge_seconds=tb,
-                    continuation_seconds=tc,
-                )
+                    "all_optimizers_success": all(x.success for x in vb + vc),
+                    "bridge_seconds": tb,
+                    "continuation_seconds": tc,
+                }
             )
     return rows
 
@@ -668,7 +679,6 @@ def continuous(
     ss = np.zeros(n)
     T = np.full(n, K, int)
     ex = np.zeros(n)
-    bw = np.zeros(n, bool)
     cell = np.full(n, 4 * K, int)
     for k in range(K):
         mb = 0.45 * np.tanh(B) + 0.25 * np.tanh(S) - 0.15 * a + 0.10 * np.tanh(W[:, 1])
@@ -984,10 +994,10 @@ def tan_lp_audit(pop, lam):
     rows = []
     rhs = []
     for k in range(K):
-        s = p0 + p[k + 1 :].sum()
+        s = p0 + p[k + 1:].sum()  # fmt: skip
         c = p[k] / s
         future = np.zeros(K)
-        future[k + 1 :] = 1
+        future[k + 1:] = 1  # fmt: skip
         unit = np.zeros(K)
         unit[k] = 1
         rows += [
@@ -1048,11 +1058,11 @@ def bootstrap_budget(cell, y, M, rng, B=499, alpha=0.05):
     ph = np.bincount(code, minlength=2 * (M + 1)) / n
     draws = rng.multinomial(n, ph, size=B) / n
     pp = draws[:, : 2 * M].reshape(B, M, 2).sum(2)
-    bb = draws[:, 1: 2 * M : 2]  # fmt: skip
+    bb = draws[:, 1: 2 * M: 2]  # fmt: skip
     mm = draws[:, 1::2].sum(1)
     Ls, Us = signed_budget_exact(mm, pp, bb)
     p = ph[: 2 * M].reshape(M, 2).sum(1)
-    b = ph[1: 2 * M : 2]  # fmt: skip
+    b = ph[1: 2 * M: 2]  # fmt: skip
     mu = ph[1::2].sum()
     L, U = signed_budget_exact(mu, p, b)
     L = float(L)
@@ -1129,16 +1139,16 @@ def completion_audit(K, J, rescue=0.5, mesh=1 / 64):
     ts = time.perf_counter()
     rr = region(v, v, v, K, gamma=0.2, mesh=mesh, refine=False)
     ss = time.perf_counter() - ts
-    return dict(
-        K=K,
-        J=J,
-        completion_variables=N,
-        boundary_variables=K,
-        max_endpoint_difference=max(abs(vals[i] - rr[i].primal_value) for i in [0, 1]),
-        max_outward_difference=max(abs(certs[i] - rr[i].value) for i in [0, 1]),
-        completion_seconds=sec,
-        boundary_seconds=ss,
-    )
+    return {
+        "K": K,
+        "J": J,
+        "completion_variables": N,
+        "boundary_variables": K,
+        "max_endpoint_difference": max(abs(vals[i] - rr[i].primal_value) for i in [0, 1]),
+        "max_outward_difference": max(abs(certs[i] - rr[i].value) for i in [0, 1]),
+        "completion_seconds": sec,
+        "boundary_seconds": ss,
+    }
 
 
 def append_result(rows, key, kind, method, interval, truth, target, **extra):
@@ -1166,25 +1176,6 @@ def append_result(rows, key, kind, method, interval, truth, target, **extra):
             **extra,
         )
     )
-
-
-import hashlib
-import itertools
-
-import sklearn
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold
-
-SAMPLE_SIZES = [50, 100, 250, 500, 1000, 2500, 10000]
-
-
-OBS_SIZES = [50, 250, 1000, 10000]
-
-
-PART_SIZES = [250, 1000, 10000]
-
-
-PARTITIONS = [1, 5, 10, 20, 40, 80]
 
 
 def obs_design(W: np.ndarray, interactions: bool = True) -> np.ndarray:
@@ -1256,10 +1247,21 @@ def observational_population() -> dict:
         b = (c["p"] * c["qR"]).mean(0)
         t = (c["p"] * c["tau"]).mean(0)
         mu = float(c["mu"].mean())
-        pops[a] = dict(
-            p=p, b=b, mu=mu, theta=float(mu + t.sum()), tau=t / p, b0=float(c["b0"].mean()), K=5
-        )
-    return dict(W=W, alpha=float(al), cond=cond, pops=pops)
+        pops[a] = {
+            "p": p,
+            "b": b,
+            "mu": mu,
+            "theta": float(mu + t.sum()),
+            "tau": t / p,
+            "b0": float(c["b0"].mean()),
+            "K": 5,
+        }
+    return {
+        "W": W,
+        "alpha": float(al),
+        "cond": cond,
+        "pops": pops,
+    }
 
 
 def draw_observational(pop: dict, n: int, scenario: str, rng) -> dict:
@@ -1282,7 +1284,14 @@ def draw_observational(pop: dict, n: int, scenario: str, rng) -> dict:
         qr[ii] = q[np.arange(len(ii)), jj]
         qnr[ii] = q0[np.arange(len(ii)), jj]
     u = rng.random(n)
-    return dict(W=W, A=A, e=e, cell=cell, y=(u < qr).astype(float), ynr=(u < qnr).astype(float))
+    return {
+        "W": W,
+        "A": A,
+        "e": e,
+        "cell": cell,
+        "y": (u < qr).astype(float),
+        "ynr": (u < qnr).astype(float),
+    }
 
 
 def fitted_logit(W, A, interactions=True):
@@ -1323,7 +1332,7 @@ def fitted_logit(W, A, interactions=True):
 
 
 def coherent_projection(mean, M):
-    """Euclidean projection of (mu,p,b) onto the fixed observed-moment polytope."""
+    """Euclidean projection of (mu,p,b) onto the fixed observed-moment polyhedron."""
     mean = np.asarray(mean, float)
     d = 1 + 2 * M
     A = []
@@ -1418,24 +1427,24 @@ def ipw_analysis(dat, pop, method, propensity, fit=None, known_bound=None, gamma
     popmom = np.r_[pop["mu"], pop["p"], pop["b"], pop["p"].sum(), pop["mu"] - pop["b"].sum()]
     pl, pu = signed_budget_exact(plugin[0], plugin[1: 1 + M], plugin[1 + M:], gamma)  # fmt: skip
     truth = exact_population(pop, "budget")
-    return dict(
-        interval=[z.value for z in rr],
-        failure=int(any(z.status != "ok" for z in rr)),
-        primitive_cover=int(np.all(popmom >= lo) and np.all(popmom <= hi)),
-        plugin_error=max(abs(float(pl) - truth[0]), abs(float(pu[0]) - truth[1])),
-        lower_error=float(pl) - truth[0],
-        upper_error=float(pu[0]) - truth[1],
-        mu_error=float(plugin[0] - pop["mu"]),
-        raw_mu_error=float(m[0] - pop["mu"]),
-        ess=float(w.sum() ** 2 / (w @ w)) if w @ w > 0 else 0.0,
-        clip_fraction=float(np.mean((e <= 0.02) | (e >= 0.98))),
-        ps_rmse=float(np.sqrt(np.mean((e - dat["e"]) ** 2))),
-        empty_fraction=float(
+    return {
+        "interval": [z.value for z in rr],
+        "failure": int(any(z.status != "ok" for z in rr)),
+        "primitive_cover": int(np.all(popmom >= lo) and np.all(popmom <= hi)),
+        "plugin_error": max(abs(float(pl) - truth[0]), abs(float(pu[0]) - truth[1])),
+        "lower_error": float(pl) - truth[0],
+        "upper_error": float(pu[0]) - truth[1],
+        "mu_error": float(plugin[0] - pop["mu"]),
+        "raw_mu_error": float(m[0] - pop["mu"]),
+        "ess": float(w.sum() ** 2 / (w @ w)) if w @ w > 0 else 0.0,
+        "clip_fraction": float(np.mean((e <= 0.02) | (e >= 0.98))),
+        "ps_rmse": float(np.sqrt(np.mean((e - dat["e"]) ** 2))),
+        "empty_fraction": float(
             np.mean([np.sum((A == 0) & (dat["cell"] == j)) == 0 for j in range(M)])
         ),
-        runtime=sum(z.runtime for z in rr),
-        dual_gap=max(z.dual_gap for z in rr),
-    )
+        "runtime": sum(z.runtime for z in rr),
+        "dual_gap": max(z.dual_gap for z in rr),
+    }
 
 
 def summarize_extended(rows, groupkeys):
@@ -1504,7 +1513,14 @@ def continuous_details(n, rng, K=5, d=5, a=0, rho=0.35, c0=0.6):
     q0 = expit(eta)
     shift = np.where(T < K, 0.7 * (1 + 0.5 * (K - 1 - T) / K + 0.25 * ex), 0.0)
     qr = expit(eta - shift)
-    return dict(W=W, T=T, ex=ex, qR=qr, q0=q0, U=rng.random(n))
+    return {
+        "W": W,
+        "T": T,
+        "ex": ex,
+        "qR": qr,
+        "q0": q0,
+        "U": rng.random(n),
+    }
 
 
 def partition_cells(dat, M, K=5):
