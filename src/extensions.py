@@ -6,6 +6,7 @@ import math
 from collections.abc import Iterable
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.special import expit
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier  # type: ignore
@@ -28,15 +29,41 @@ OBS_METHODS = [
 ]
 
 
-def _rng(master, *keys):
+def _rng(master: int, *keys: int) -> np.random.Generator:
+    """Generate a random number generator.
+
+    Args:
+        master (int): The master seed.
+        keys (int): The keys to generate the random number generator.
+
+    Returns:
+        np.random.Generator: The random number generator.
+    """
     return np.random.default_rng(np.random.SeedSequence([int(master), *map(int, keys)]))
 
 
-def _int_seed(master, *keys):
+def _int_seed(master: int, *keys: int) -> int:
+    """Generate an integer seed.
+
+    Args:
+        master (int): The master seed.
+        keys (int): The keys to generate the integer seed.
+
+    Returns:
+        int: The integer seed.
+    """
     return int(np.random.SeedSequence([int(master), *map(int, keys)]).generate_state(1)[0])
 
 
-def _suites(config):
+def _suites(config: dict) -> set[str]:
+    """Select the suites to run.
+
+    Args:
+        config (dict): The configuration.
+
+    Returns:
+        set[str]: The suites to run.
+    """
     selected = config.get("suites", ["observational", "continuous", "partitions"])
     if isinstance(selected, str):
         selected = selected.split(",")
@@ -44,7 +71,14 @@ def _suites(config):
 
 
 def preparation_jobs(config) -> Iterable[dict]:
-    """One counted reference task for each selected independent population law."""
+    """One counted reference task for each selected independent population law.
+
+    Args:
+        config (dict): The configuration.
+
+    Returns:
+        Iterable[dict]: The preparation jobs.
+    """
     selected = _suites(config)
     if "observational" in selected:
         yield {
@@ -74,9 +108,17 @@ def preparation_jobs(config) -> Iterable[dict]:
         }
 
 
-def prepare_extensions(config):
-    """Sequential convenience wrapper; the runner normally dispatches reference jobs."""
-    context, files = {}, {}
+def prepare_extensions(config: dict) -> tuple[dict, dict]:
+    """Sequential convenience wrapper; the runner normally dispatches reference jobs.
+
+    Args:
+        config (dict): The configuration.
+
+    Returns:
+        tuple[dict, dict]: The context and files.
+    """
+    context: dict = {}
+    files: dict = {}
     for job in preparation_jobs(config):
         partial, records = run_preparation_job(job)
         context.update(partial)
@@ -85,7 +127,16 @@ def prepare_extensions(config):
     return context, files
 
 
-def extension_jobs(config, context) -> Iterable[dict]:
+def extension_jobs(config: dict, context: dict) -> Iterable[dict]:
+    """Generate the extension jobs.
+
+    Args:
+        config (dict): The configuration.
+        context (dict): The context.
+
+    Returns:
+        Iterable[dict]: The extension jobs.
+    """
     selected = _suites(config)
     if "observational" in selected:
         for scenario in ("linear", "nonlinear"):
@@ -131,11 +182,24 @@ def extension_jobs(config, context) -> Iterable[dict]:
                 }
 
 
-def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6):
+def continuous_paths(
+    n: int, rng: np.random.Generator, K: int = 5, d: int = 5, rho: float = 0.35, c0: float = 0.6
+) -> dict:
     """No-rescue path probabilities, using the paper's correlated innovations.
 
     The maximum centered biomarker permits one common-random-number threshold
     calibration without rerunning paths. Outcome uniforms are drawn separately.
+
+    Args:
+        n (int): The number of paths.
+        rng (np.random.Generator): The random number generator.
+        K (int): The number of thresholds.
+        d (int): The number of dimensions.
+        rho (float): The correlation between the thresholds.
+        c0 (float): The initial threshold.
+
+    Returns:
+        dict: The continuous paths.
     """
     W = rng.normal(size=(n, d))
     for j in range(1, d):
@@ -178,13 +242,37 @@ def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6):
     }
 
 
-def _continuous_cells(dat, K):
+def _continuous_cells(dat: dict, K: int) -> NDArray[np.int32]:
+    """Generate the continuous cells.
+
+    Args:
+        dat (dict): The data.
+        K (int): The number of thresholds.
+
+    Returns:
+        NDArray[np.int32]: The continuous cells.
+    """
     return np.where(
         dat["T"] < K, 4 * dat["T"] + 2 * (dat["W"][:, 0] >= 0) + (dat["ex"] > 0.5), 4 * K
     ).astype(int)
 
 
-def _calibration(config, suite, ci=0, K=5, d=5, rho=0.35):
+def _calibration(
+    config: dict, suite: int, ci: int = 0, K: int = 5, d: int = 5, rho: float = 0.35
+) -> tuple[float, dict]:
+    """Generate the calibration.
+
+    Args:
+        config (dict): The configuration.
+        suite (int): The suite.
+        ci (int): The ci.
+        K (int): The number of thresholds.
+        d (int): The number of dimensions.
+        rho (float): The correlation between the thresholds.
+
+    Returns:
+        tuple[float, dict]: The calibration.
+    """
     n = int(config.get("calibration_n", 100000))
     if n < 2:
         raise ValueError("calibration_n must be at least 2")
@@ -200,7 +288,15 @@ def _calibration(config, suite, ci=0, K=5, d=5, rho=0.35):
     }
 
 
-def _batch_sizes(config):
+def _batch_sizes(config: dict) -> list[int]:
+    """Generate the batch sizes.
+
+    Args:
+        config (dict): The configuration.
+
+    Returns:
+        list[int]: The batch sizes.
+    """
     total = int(config.get("oracle_n", 2000000))
     if total < 2:
         raise ValueError("oracle_n must be at least 2")
@@ -209,7 +305,20 @@ def _batch_sizes(config):
     return [q + int(bi < remainder) for bi in range(count)]
 
 
-def _moments(cell, qr, q0, M):
+def _moments(
+    cell: NDArray[np.int32], qr: NDArray[np.float64], q0: NDArray[np.float64], M: int
+) -> dict:
+    """Generate the moments.
+
+    Args:
+        cell (NDArray[np.int32]): The cell.
+        qr (NDArray[np.float64]): The qr.
+        q0 (NDArray[np.float64]): The q0.
+        M (int): The number of moments.
+
+    Returns:
+        dict: The moments.
+    """
     n = len(cell)
     return {
         "p": np.bincount(cell, minlength=M + 1)[:M] / n,
@@ -220,7 +329,15 @@ def _moments(cell, qr, q0, M):
     }
 
 
-def _wide_moments(pop):
+def _wide_moments(pop: dict) -> dict:
+    """Generate the wide moments.
+
+    Args:
+        pop (dict): The population.
+
+    Returns:
+        dict: The wide moments.
+    """
     return {
         f"{name}{j + 1}": float(value)
         for name in ("p", "b", "t")
@@ -228,7 +345,15 @@ def _wide_moments(pop):
     }
 
 
-def _population_record(pop):
+def _population_record(pop: dict) -> dict:
+    """Generate the population record.
+
+    Args:
+        pop (dict): The population.
+
+    Returns:
+        dict: The population record.
+    """
     low, high = fm.exact_population(pop, "budget")
     p, b, t = pop["p"], pop["b"], pop["t"]
     norm2 = float(np.sum(np.divide(t**2, p, out=np.zeros_like(p), where=p > 0)))
@@ -247,20 +372,45 @@ def _population_record(pop):
     )
 
 
-def _batch_se(records, name):
-    """Batch-means MCSE, weighted for a final batch of a different size."""
+def _batch_se(records: list[dict], name: str) -> float:
+    """Generate the batch-means MCSE.
+
+    Args:
+        records (list[dict]): The records.
+        name (str): The name.
+
+    Returns:
+        float: The batch-means MCSE.
+    """
     values = np.array([r[name] for r in records], float)
     sizes = np.array([r["n"] for r in records], float)
     center = np.average(values, weights=sizes)
     return float(np.sqrt(np.sum(sizes * (values - center) ** 2) / (len(records) - 1) / sizes.sum()))
 
 
-def _accumulate(total, batch, weight):
+def _accumulate(total: dict, batch: dict, weight: float) -> None:
+    """Accumulate the total.
+
+    Args:
+        total (dict): The total.
+        batch (dict): The batch.
+        weight (float): The weight.
+    """
     for name in ("p", "b", "t", "mu", "theta"):
         total[name] = total.get(name, 0.0) + weight * batch[name]
 
 
-def _finish_reference(pop, records, **metadata):
+def _finish_reference(pop: dict, records: list[dict], **metadata: dict) -> dict:
+    """Finish the reference.
+
+    Args:
+        pop (dict): The population.
+        records (list[dict]): The records.
+        metadata (dict): The metadata.
+
+    Returns:
+        dict: The reference.
+    """
     pop["tau"] = np.divide(pop["t"], pop["p"], out=np.zeros_like(pop["p"]), where=pop["p"] > 0)
     pop.update(metadata)
     pop.update(
@@ -275,8 +425,15 @@ def _finish_reference(pop, records, **metadata):
     return pop
 
 
-def _suite_files(files):
-    """Use the same relative archive paths for fresh jobs and resumed jobs."""
+def _suite_files(files: dict) -> dict:
+    """Use the same relative archive paths for fresh jobs and resumed jobs.
+
+    Args:
+        files (dict): The files.
+
+    Returns:
+        dict: The suite files.
+    """
     directories = {
         "observational": "observational",
         "continuous": "continuous",
@@ -288,12 +445,30 @@ def _suite_files(files):
     }
 
 
-def run_preparation_job(job):
+def run_preparation_job(job: dict) -> tuple[dict, dict]:
+    """Run a preparation job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        tuple[dict, dict]: The context and files.
+    """
+    context: dict = {}
+    files: dict = {}
     context, files = _run_preparation_job(job)
     return context, _suite_files(files)
 
 
-def _run_preparation_job(job):
+def _run_preparation_job(job: dict) -> tuple[dict, dict]:
+    """Run a preparation job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        tuple[dict, dict]: The context and files.
+    """
     config = job["config"]
     if job["suite"] == "prepare_observational":
         pop = fm.observational_population()
@@ -435,17 +610,57 @@ def _run_preparation_job(job):
     raise ValueError(f"Unknown preparation suite {job['suite']}")
 
 
-def _truth_moments(pop):
+def _truth_moments(pop: dict) -> NDArray[np.float64]:
+    """Generate the truth moments.
+
+    Args:
+        pop (dict): The population.
+
+    Returns:
+        NDArray[np.float64]: The truth moments.
+    """
     return np.r_[pop["mu"], pop["p"], pop["b"], pop["p"].sum(), pop["mu"] - pop["b"].sum()]
 
 
-def _bound_diagnostics(bounds):
+def _bound_diagnostics(bounds: list[fm.Bound]) -> dict:
+    """Generate the bound diagnostics.
+
+    Args:
+        bounds (list[fm.Bound]): The bounds.
+
+    Returns:
+        dict: The bound diagnostics.
+    """
     result = fm.bound_diagnostics(bounds)
     result["numerical_violation"] = float(max(b.violation for b in bounds))
     return result
 
 
-def _moment_rows(key, method, raw, plugin, lo, hi, pop, M):
+def _moment_rows(
+    key: dict,
+    method: str,
+    raw: NDArray[np.float64],
+    plugin: NDArray[np.float64],
+    lo: NDArray[np.float64],
+    hi: NDArray[np.float64],
+    pop: dict,
+    M: int,
+) -> list[dict]:
+    """Generate the moment rows.
+
+    Args:
+        key (dict): The key.
+        method (str): The method.
+        raw (NDArray[np.float64]): The raw moments.
+        plugin (NDArray[np.float64]): The plugin moments.
+        lo (NDArray[np.float64]): The lower bounds.
+        hi (NDArray[np.float64]): The upper bounds.
+        pop (dict): The population.
+        M (int): The number of moments.
+
+    Returns:
+        list[dict]: The moment rows.
+    """
     names = (
         ["mu"] + [f"p{j+1}" for j in range(M)] + [f"b{j+1}" for j in range(M)] + ["rescue", "b0"]
     )
@@ -466,7 +681,19 @@ def _moment_rows(key, method, raw, plugin, lo, hi, pop, M):
     ]
 
 
-def _result(key, method, interval, pop, **extra):
+def _result(key: dict, method: str, interval: list[float], pop: dict, **extra: dict) -> dict:
+    """Generate the result.
+
+    Args:
+        key (dict): The key.
+        method (str): The method.
+        interval (list[float]): The interval.
+        pop (dict): The population.
+        extra (dict): The extra.
+
+    Returns:
+        dict: The result.
+    """
     truth = fm.exact_population(pop, "budget")
     rows = []
     fm.append_result(rows, key, "budget", method, interval, truth, pop["theta"], **extra)
@@ -488,8 +715,21 @@ def _result(key, method, interval, pop, **extra):
     return r
 
 
-def _physical_fallback(key, method, pop, exc, **extra):
-    """A failed construction supplies the full physical moment and target region."""
+def _physical_fallback(
+    key: dict, method: str, pop: dict, exc: Exception, **extra: dict
+) -> tuple[dict, list[dict]]:
+    """Generate the physical fallback.
+
+    Args:
+        key (dict): The key.
+        method (str): The method.
+        pop (dict): The population.
+        exc (Exception): The exception.
+        extra (dict): The extra.
+
+    Returns:
+        tuple[dict, list[dict]]: The physical fallback.
+    """
     row = _result(
         key,
         method,
@@ -508,7 +748,31 @@ def _physical_fallback(key, method, pop, exc, **extra):
     return row, moments
 
 
-def _unweighted_analysis(cell, y, M, pop, method, key, config, refine):
+def _unweighted_analysis(
+    cell: NDArray[np.int32],
+    y: NDArray[np.float64],
+    M: int,
+    pop: dict,
+    method: str,
+    key: dict,
+    config: dict,
+    refine: bool,
+) -> tuple[dict, list[dict]]:
+    """Generate the unweighted analysis.
+
+    Args:
+        cell (NDArray[np.int32]): The cell.
+        y (NDArray[np.float64]): The y.
+        M (int): The number of moments.
+        pop (dict): The population.
+        method (str): The method.
+        key (dict): The key.
+        config (dict): The configuration.
+        refine (bool): Whether to refine.
+
+    Returns:
+        tuple[dict, list[dict]]: The unweighted analysis.
+    """
     F = fm.features(cell, y, M)
     mean, lo, hi, al, au = fm.cell_region(F, method)
     bounds = fm.region(
@@ -545,7 +809,15 @@ def _unweighted_analysis(cell, y, M, pop, method, key, config, refine):
     return row, _moment_rows(key, method, fullmean, fullmean, full_lo, full_hi, pop, M)
 
 
-def _continuous_job(job):
+def _continuous_job(job: dict) -> dict:
+    """Generate the continuous job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The continuous job.
+    """
     config, pop = job["config"], job["pop"]
     ci, K, d, rho, n, rep = (job[k] for k in ("ci", "K", "d", "rho", "n", "rep"))
     master = int(config.get("seed", 42))
@@ -569,7 +841,7 @@ def _continuous_job(job):
     }
     try:
         row, moments = _unweighted_analysis(cell, y, 4 * K, pop, "cp", key, config, True)
-    except Exception as exc:
+    except (ValueError, RuntimeError, ArithmeticError) as exc:
         row, moments = _physical_fallback(key, "cp", pop, exc)
     return {
         "continuous_replications.csv": [row],
@@ -584,7 +856,15 @@ def _continuous_job(job):
     }
 
 
-def _partition_job(job):
+def _partition_job(job: dict) -> dict:
+    """Generate the partition job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The partition job.
+    """
     config, reference, n, rep = (job[k] for k in ("config", "pop", "n", "rep"))
     master = int(config.get("seed", 42))
     dat = continuous_paths(n, _rng(master, 3, n, rep, 0), c0=reference["c0"])
@@ -612,7 +892,7 @@ def _partition_job(job):
                 row["common_target_error"] = max(
                     abs(row["plugin_lower"] - fine[cap][0]), abs(row["plugin_upper"] - fine[cap][1])
                 )
-            except Exception as exc:
+            except (ValueError, RuntimeError, ArithmeticError) as exc:
                 row, mr = _physical_fallback(key, "cp", pop, exc)
                 moments.extend(mr)
             row["coarsening_gap"] = fm.exact_population(pop, "budget")[1] - fine[cap][1]
@@ -644,7 +924,25 @@ def _partition_job(job):
     }
 
 
-def _draw_observational(pop, n, scenario, path_rng, outcome_rng):
+def _draw_observational(
+    pop: dict,
+    n: int,
+    scenario: str,
+    path_rng: np.random.Generator,
+    outcome_rng: np.random.Generator,
+) -> dict:
+    """Generate the observational data.
+
+    Args:
+        pop (dict): The population.
+        n (int): The number of observations.
+        scenario (str): The scenario.
+        path_rng (np.random.Generator): The path random number generator.
+        outcome_rng (np.random.Generator): The outcome random number generator.
+
+    Returns:
+        dict: The observational data.
+    """
     wi = path_rng.integers(0, len(pop["W"]), n)
     W = pop["W"][wi]
     e = fm.obs_propensity(W, scenario)
@@ -677,7 +975,34 @@ def _draw_observational(pop, n, scenario, path_rng, outcome_rng):
     }
 
 
-def _ipw_analysis(dat, pop, name, propensity, fit, bound, key, config):
+def _ipw_analysis(
+    dat: dict,
+    pop: dict,
+    name: str,
+    propensity: NDArray[np.float64],
+    fit: tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]],
+    bound: float,
+    key: dict,
+    config: dict,
+) -> tuple[dict, list[dict]]:
+    """Generate the IPW analysis.
+
+    Args:
+        dat (dict): The data.
+        pop (dict): The population.
+        name (str): The name.
+        propensity (NDArray[np.float64]): The propensity.
+        fit
+          (tuple[
+            NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
+          ]): The fit.
+        bound (float): The bound.
+        key (dict): The key.
+        config (dict): The configuration.
+
+    Returns:
+        tuple[dict, list[dict]]: The IPW analysis.
+    """
     M, n = 5, len(dat["A"])
     Q = fm.add_aggregates(fm.features(dat["cell"], dat["y"], M), M)
     A, e = dat["A"], np.asarray(propensity)
@@ -757,7 +1082,16 @@ def _ipw_analysis(dat, pop, name, propensity, fit, bound, key, config):
     return row, _moment_rows(key, name, raw, full_plugin, lo, hi, pop, M)
 
 
-def _paired_methods(rows, keys):
+def _paired_methods(rows: list[dict], keys: list[str]) -> list[dict]:
+    """Generate the paired methods.
+
+    Args:
+        rows (list[dict]): The rows.
+        keys (list[str]): The keys.
+
+    Returns:
+        list[dict]: The paired methods.
+    """
     contrasts = []
     for left, right in itertools.combinations(rows, 2):
         contrasts.append(
@@ -774,7 +1108,15 @@ def _paired_methods(rows, keys):
     return contrasts
 
 
-def _observational_job(job):
+def _observational_job(job: dict) -> dict:
+    """Run an observational job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The files.
+    """
     config, population, scenario, n, rep = (
         job[k] for k in ("config", "pop", "scenario", "n", "rep")
     )
@@ -809,7 +1151,7 @@ def _observational_job(job):
                     "coefficients": json.dumps(beta.tolist()),
                 }
             )
-        except Exception as exc:
+        except (ValueError, RuntimeError, ArithmeticError) as exc:
             errors[name] = f"{type(exc).__name__}: {exc}"
             diagnostics.append({**key, "nuisance": name, "failure": 1, "reason": errors[name]})
     split_seed = _int_seed(forest_master, 1, si, n, rep)
@@ -846,7 +1188,7 @@ def _observational_job(job):
                 "clip_fraction": float(np.mean((predictions < 0.02) | (predictions > 0.98))),
             }
         )
-    except Exception as exc:
+    except (ValueError, RuntimeError, ArithmeticError) as exc:
         errors["rf"] = f"{type(exc).__name__}: {exc}"
         diagnostics.append(
             dict(
@@ -871,7 +1213,7 @@ def _observational_job(job):
                 dat, target, name, e, fit, bound if root == "oracle" else 50.0, key, config
             )
             moments.extend(mr)
-        except Exception as exc:
+        except (ValueError, RuntimeError, ArithmeticError) as exc:
             row, mr = _physical_fallback(
                 key, name, target, exc, nuisance_failure=int(root in errors)
             )
@@ -892,7 +1234,15 @@ def _observational_job(job):
     }
 
 
-def run_extension_job(job):
+def run_extension_job(job: dict) -> dict:
+    """Run an extension job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The files.
+    """
     files = {
         "observational": _observational_job,
         "continuous": _continuous_job,
