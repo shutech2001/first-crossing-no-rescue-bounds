@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,10 +24,24 @@ PARTITIONS = [1, 5, 10, 20, 40, 80]
 
 
 def rng_for(*keys: int) -> np.random.Generator:
+    """Return a random number generator for the given keys.
+
+    Args:
+        *keys (int): The keys.
+
+    Returns:
+        np.random.Generator: The random number generator.
+    """
     return np.random.default_rng(np.random.SeedSequence([MASTER, *map(int, keys)]))
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write the rows to a CSV file.
+
+    Args:
+        path (Path): The path to the CSV file.
+        rows (list[dict]): The rows.
+    """
     if not rows:
         return
     keys = list(dict.fromkeys(k for r in rows for k in r))
@@ -39,12 +52,33 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def finite_population(
-    K: int = 5, J: int = 4, rescue: float = 0.5, arm: int = 0, alpha: Optional[float] = None
+    K: int = 5, J: int = 4, rescue: float = 0.5, arm: int = 0, alpha: float | None = None
 ) -> dict:
-    """Exact dynamic enumeration of the Markov DGP in the manuscript."""
+    """Exact dynamic enumeration of the Markov DGP in the manuscript.
+
+    Args:
+        K (int): The number of states.
+        J (int): The number of outcomes.
+        rescue (float): The rescue parameter.
+        arm (int): The arm.
+        alpha (float | None): The alpha.
+
+    Returns:
+        dict: The finite population.
+    """
     states = np.arange(J)
 
     def one(al: float, a: int, arrays: bool = False):
+        """Return the one population.
+
+        Args:
+            al (float): The alpha.
+            a (int): The arm.
+            arrays (bool): Whether to return arrays.
+
+        Returns:
+            dict: The one population.
+        """
         mass = np.array([1.0])
         prev = np.array([(J - 1) / 2])
         crossing = []
@@ -83,7 +117,9 @@ def finite_population(
             if k < K - 1:
                 tr = trans[k + 1]
                 A[k * J: (k + 1) * J, (k + 1) * (J + 1): (k + 2) * (J + 1)] = -tr  # fmt: skip
-                E[k * (J + 1): k * (J + 1) + J] = tr @ E[(k + 1) * (J + 1): (k + 2) * (J + 1)]  # fmt: skip # noqa: E501
+                current_rows = slice(k * (J + 1), k * (J + 1) + J)
+                next_rows = slice((k + 1) * (J + 1), (k + 2) * (J + 1))
+                E[current_rows] = tr @ E[next_rows]
         load = np.zeros(N)
         load[: J + 1] = masses[0]
         metric = np.concatenate(masses)
@@ -117,8 +153,19 @@ def finite_population(
 
 
 def draw_finite(
-    pop: dict, n: int, rng: np.random.Generator, outcome_rng: Optional[np.random.Generator] = None
+    pop: dict, n: int, rng: np.random.Generator, outcome_rng: np.random.Generator | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Draw the finite population.
+
+    Args:
+        pop (dict): The population.
+        n (int): The number of draws.
+        rng (np.random.Generator): The random number generator.
+        outcome_rng (np.random.Generator | None): The outcome random number generator.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: The draws.
+    """
     p = pop["p"]
     M = len(p)
     cell = rng.choice(M + 1, size=n, p=np.r_[p, 1 - p.sum()])
@@ -129,17 +176,39 @@ def draw_finite(
 
 
 def features(cell: NDArray[np.int32], y: NDArray[np.float64], M: int) -> NDArray[np.float64]:
+    """Return the features.
+
+    Args:
+        cell (NDArray[np.int32]): The cell.
+        y (NDArray[np.float64]): The y.
+        M (int): The number of features.
+
+    Returns:
+        NDArray[np.float64]: The features.
+    """
     z = (cell[:, None] == np.arange(M)[None, :]).astype(float)
     return np.column_stack([y, z, z * y[:, None]])
 
 
 def moment_box(
-    F: np.ndarray,
+    F: NDArray[np.float64],
     method: str,
     alpha: float = 0.05,
-    total_D: Optional[int] = None,
-    lengths: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    total_D: int | None = None,
+    lengths: NDArray[np.float64] | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Return the moment box.
+
+    Args:
+        F (NDArray[np.float64]): The F.
+        method (str): The method.
+        alpha (float): The alpha.
+        total_D (int | None): The total D.
+        lengths (NDArray[np.float64] | None): The lengths.
+
+    Returns:
+        tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]: The moment box.
+    """
     n, D = F.shape
     DD = total_D or D
     if n < 2:
@@ -169,7 +238,32 @@ def moment_box(
     return mean, lo, hi
 
 
-def analysis_box(F: np.ndarray, method: str, extra_D: int = 0, range_only: bool = False):
+def analysis_box(
+    F: NDArray[np.float64], method: str, extra_D: int = 0, range_only: bool = False
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Return the analysis box.
+
+    Args:
+        F (NDArray[np.float64]): The F.
+        method (str): The method.
+        extra_D (int): The extra D.
+        range_only (bool): Whether to return only the range.
+
+    Returns:
+        tuple[
+            NDArray[np.float64],
+            NDArray[np.float64],
+            NDArray[np.float64],
+            NDArray[np.float64],
+            NDArray[np.float64]
+        ]: The analysis box.
+    """
     M = (F.shape[1] - 1) // 2
     agg = np.column_stack([F[:, 1: 1 + M].sum(1), F[:, 0] - F[:, 1 + M:].sum(1)])  # fmt: skip
     if range_only:
@@ -188,7 +282,7 @@ class Bound:
     runtime: float
     violation: float
     dual_gap: float
-    witness: Optional[np.ndarray] = None
+    witness: np.ndarray | None = None
     mesh: float = DEFAULT_MESH
     refinement_count: int = 0
     inner_gap: float = float("nan")
@@ -204,10 +298,20 @@ def _rational_lower(
     bounds: list[tuple[float, float]],
     marg: NDArray[np.float64],
 ) -> float:
-    """A valid lower bound for min c'x on a bounded LP, independent of dual feasibility.
+    """Return a valid lower bound for min c'x on a bounded LP, independent of dual feasibility.
 
     lambda >= 0; L = -lambda'b + min_box (c + A'lambda)'x.
     Only nonzero multipliers are accumulated; exact binary-float rationals are used.
+
+    Args:
+        c (NDArray[np.float64]): The c.
+        A (NDArray[np.float64]): The A.
+        b (NDArray[np.float64]): The b.
+        bounds (list[tuple[float, float]]): The bounds.
+        marg (NDArray[np.float64]): The marg.
+
+    Returns:
+        float: The valid lower bound.
     """
     if not np.all(np.isfinite(marg)):
         raise ValueError("non-finite dual multipliers")
@@ -228,7 +332,16 @@ def _rational_lower(
 
 
 def _outward_add(a: float, b: float, direction: int) -> float:
-    """Add an objective offset with one final exact-rational outward rounding."""
+    """Return an objective offset with one final exact-rational outward rounding.
+
+    Args:
+        a (float): The a.
+        b (float): The b.
+        direction (int): The direction.
+
+    Returns:
+        float: The objective offset.
+    """
     total = Fraction.from_float(float(a)) + Fraction.from_float(float(b))
     result = float(total)
     if direction * (Fraction.from_float(result) - total) > 0:
@@ -241,27 +354,51 @@ def solve_mass(
     lo: NDArray[np.float64],
     hi: NDArray[np.float64],
     M: int,
-    gamma: Optional[float] = 0.2,
+    gamma: float | None = 0.2,
     signed: bool = True,
-    H: Optional[NDArray[np.float64]] = None,
-    dlo: Optional[NDArray[np.float64]] = None,
-    dhi: Optional[NDArray[np.float64]] = None,
+    H: NDArray[np.float64] | None = None,
+    dlo: NDArray[np.float64] | None = None,
+    dhi: NDArray[np.float64] | None = None,
     direction: int = 1,
-    mesh: Optional[float] = None,
+    mesh: float | None = None,
     inner: bool = False,
-    center: Optional[NDArray[np.float64]] = None,
+    center: NDArray[np.float64] | None = None,
     certificate: bool = True,
-    aggregate_lo: Optional[NDArray[np.float64]] = None,
-    aggregate_hi: Optional[NDArray[np.float64]] = None,
-    effect_lower: Optional[NDArray[np.float64]] = None,
-    effect_upper: Optional[NDArray[np.float64]] = None,
-    extra_linear: Optional[tuple] = None,
+    aggregate_lo: NDArray[np.float64] | None = None,
+    aggregate_hi: NDArray[np.float64] | None = None,
+    effect_lower: NDArray[np.float64] | None = None,
+    effect_upper: NDArray[np.float64] | None = None,
+    extra_linear: tuple | None = None,
 ) -> Bound:
     """LP bracket of the mass-coordinate program; direction=+1 lower, -1 upper.
 
     Dyadic mesh and zero center make every tangent coefficient exactly representable.
     Nonzero-center tangent rows are relaxed by an explicitly bounded rounding guard.
     The main reported results use center zero. Variables are (mu,p,b,t,s).
+
+    Args:
+        mean (NDArray[np.float64]): The mean.
+        lo (NDArray[np.float64]): The lo.
+        hi (NDArray[np.float64]): The hi.
+        M (int): The number of features.
+        gamma (float | None): The gamma.
+        signed (bool): Whether to sign the budget.
+        H (NDArray[np.float64] | None): The H.
+        dlo (NDArray[np.float64] | None): The dlo.
+        dhi (NDArray[np.float64] | None): The dhi.
+        direction (int): The direction.
+        mesh (float | None): The mesh.
+        inner (bool): Whether to use the inner budget.
+        center (NDArray[np.float64] | None): The center.
+        certificate (bool): Whether to use the certificate.
+        aggregate_lo (NDArray[np.float64] | None): The aggregate lo.
+        aggregate_hi (NDArray[np.float64] | None): The aggregate hi.
+        effect_lower (NDArray[np.float64] | None): The effect lower.
+        effect_upper (NDArray[np.float64] | None): The effect upper.
+        extra_linear (tuple | None): The extra linear.
+
+    Returns:
+        Bound: The bound.
     """
     mesh = DEFAULT_MESH if mesh is None else mesh
     if direction not in [1, -1]:
@@ -294,7 +431,7 @@ def solve_mass(
     s0 = 1 + 3 * M
     nv = 1 + 4 * M
     G = None if gamma is None else float(gamma**2)
-    steps = int(round(2 / mesh))
+    steps = round(2 / mesh)
     if steps < 1 or (steps & (steps - 1)) or steps > 2**20:
         raise ValueError(
             "Certified tangent implementation requires a dyadic grid with at most 2**20 intervals."
@@ -316,6 +453,12 @@ def solve_mass(
     rhs = []
 
     def row(vals: dict[int, float], rhsval: float):
+        """Append a linear inequality to the current LP constraint lists.
+
+        Args:
+            vals (dict[int, float]): Nonzero coefficients indexed by variable.
+            rhsval (float): Upper bound on the linear expression.
+        """
         a = np.zeros(nv)
         for j, v in vals.items():
             a[j] = v
@@ -469,13 +612,22 @@ def region(
     endpoint_tolerance=1e-4,
     residual_tolerance=1e-8,
     **kwargs,
-):
+) -> tuple[Bound, Bound]:
     """Outward LP interval with at most two additional dyadic refinements.
 
-    Inner primal values are only residual-checked witnesses. The reported
-    endpoints always remain rational outward certificates from the outer LP.
-    Use ``refine=False`` for the fixed-mesh observational, partition and radius
-    extensions, or for audits comparing two LPs at an identical mesh.
+    Args:
+        mean (NDArray[np.float64]): The mean.
+        lo (NDArray[np.float64]): The lo.
+        hi (NDArray[np.float64]): The hi.
+        M (int): The number of features.
+        refine (bool): Whether to refine.
+        max_refinements (int): The maximum refinements.
+        endpoint_tolerance (float): The endpoint tolerance.
+        residual_tolerance (float): The residual tolerance.
+        **kwargs: The keyword arguments.
+
+    Returns:
+        tuple[Bound, Bound]: The bounds.
     """
     if not 0 <= max_refinements <= 2:
         raise ValueError("The numerical protocol permits at most two refinements.")
@@ -537,31 +689,54 @@ def bound_diagnostics(rr):
     """Serializable endpoint and numerical-refinement diagnostics."""
 
     def finite_max(values):
+        """Return the largest finite diagnostic value.
+
+        Args:
+            values (Iterable[float]): Diagnostic values to compare.
+
+        Returns:
+            float: The maximum, or NaN if no finite values are available.
+        """
         values = [float(v) for v in values if np.isfinite(v)]
         return max(values) if values else float("nan")
 
-    return dict(
-        failure=int(any(z.status != "ok" for z in rr)),
-        empty_program=int(any(z.status in {"lp_failure_2", "empty_box", "empty_inner_budget"} for z in rr)),
-        unavailable_certificate=int(any(z.status.startswith("certificate_") for z in rr)),
-        stopping_limit=int(any(
-            z.refinement_count == 2 and z.inner_status in {"gap_above_tolerance", "residual_failed"}
-            for z in rr
-        )),
-        runtime=sum(z.runtime for z in rr),
-        dual_gap=finite_max(z.dual_gap for z in rr),
-        lower_status=rr[0].status,
-        upper_status=rr[1].status,
-        mesh=max(z.mesh for z in rr),
-        refinement_count=max(z.refinement_count for z in rr),
-        inner_gap=finite_max(z.inner_gap for z in rr),
-        inner_violation=finite_max(z.inner_violation for z in rr),
-        inner_status=";".join(dict.fromkeys(z.inner_status for z in rr)),
-        budget_allowance=max(z.budget_allowance for z in rr),
-    )
+    return {
+        "failure": int(any(z.status != "ok" for z in rr)),
+        "empty_program": int(
+            any(z.status in {"lp_failure_2", "empty_box", "empty_inner_budget"} for z in rr)
+        ),
+        "unavailable_certificate": int(any(z.status.startswith("certificate_") for z in rr)),
+        "stopping_limit": int(
+            any(
+                z.refinement_count == 2
+                and z.inner_status in {"gap_above_tolerance", "residual_failed"}
+                for z in rr
+            )
+        ),
+        "runtime": sum(z.runtime for z in rr),
+        "dual_gap": finite_max(z.dual_gap for z in rr),
+        "lower_status": rr[0].status,
+        "upper_status": rr[1].status,
+        "mesh": max(z.mesh for z in rr),
+        "refinement_count": max(z.refinement_count for z in rr),
+        "inner_gap": finite_max(z.inner_gap for z in rr),
+        "inner_violation": finite_max(z.inner_violation for z in rr),
+        "inner_status": ";".join(dict.fromkeys(z.inner_status for z in rr)),
+        "budget_allowance": max(z.budget_allowance for z in rr),
+    }
 
 
 def population_region(pop: dict, kind: str, mesh=1 / 256):
+    """Compute certified bounds with the population moments held fixed.
+
+    Args:
+        pop (dict): Population moments, including cell effects for calibration.
+        kind (str): Restriction class: range, signed, budget, or calibrated.
+        mesh (float): Tangent-grid spacing for the initial LP approximation.
+
+    Returns:
+        tuple[Bound, Bound]: Lower and upper outward bounds with diagnostics.
+    """
     p = pop["p"]
     b = pop["b"]
     M = len(p)
@@ -576,6 +751,15 @@ def population_region(pop: dict, kind: str, mesh=1 / 256):
 
 
 def calibration_matrix(M: int) -> np.ndarray:
+    """Group odd-numbered crossing visits into two calibration totals.
+
+    Args:
+        M (int): Number of crossing cells, ordered by visit.
+
+    Returns:
+        np.ndarray: A (2, M) indicator matrix splitting odd visits between
+            the first and second halves of the visit sequence.
+    """
     h = np.zeros((2, M))
     select = np.arange(M) % 2 == 0
     h[0, select & (np.arange(M) < math.ceil(M / 2))] = 1
@@ -584,6 +768,12 @@ def calibration_matrix(M: int) -> np.ndarray:
 
 
 def geometry_audit() -> list[dict]:
+    """Compare the reduced and continuation-coordinate representations.
+
+    Returns:
+        list[dict]: Dimensions, algebraic residuals, endpoint differences,
+            optimizer success indicators, and runtimes for each reference law.
+    """
     rows = []
     for K in [3, 5]:
         for J in [4, 12]:
@@ -605,7 +795,22 @@ def geometry_audit() -> list[dict]:
             qc = pop["qR"]
             rho = 0.2
 
-            def bc(sign):
+            def bc(sign, *, K=K, p=p, qc=qc, rho=rho, Om=Om):
+                """Optimize a support endpoint in crossing-effect coordinates.
+
+                Defaults bind the current population inputs for the callbacks.
+
+                Args:
+                    sign (int): One for minimization or minus one for maximization.
+                    K (int): Number of crossing visits.
+                    p (np.ndarray): Crossing probabilities for the current law.
+                    qc (np.ndarray): Observed outcome means in the crossing cells.
+                    rho (float): Radius of the quadratic restriction.
+                    Om (np.ndarray): Quadratic metric in crossing-effect coordinates.
+
+                Returns:
+                    OptimizeResult: The constrained SLSQP result.
+                """
                 return minimize(
                     lambda z: sign * p @ z,
                     np.zeros(K),
@@ -620,7 +825,24 @@ def geometry_audit() -> list[dict]:
                     options={"ftol": 1e-10, "maxiter": 500},
                 )
 
-            def cc(sign):
+            def cc(sign, *, K=K, J=J, r=r, A=A, rho=rho, pop=pop, qc=qc):
+                """Optimize the same support endpoint in continuation coordinates.
+
+                Defaults bind the current population inputs for the callbacks.
+
+                Args:
+                    sign (int): One for minimization or minus one for maximization.
+                    K (int): Number of crossing visits.
+                    J (int): Number of non-triggering states per visit.
+                    r (np.ndarray): Objective loadings in continuation coordinates.
+                    A (np.ndarray): Linear compatibility constraint matrix.
+                    rho (float): Radius of the quadratic restriction.
+                    pop (dict): Current population, including state-mass weights G.
+                    qc (np.ndarray): Observed outcome means in the crossing cells.
+
+                Returns:
+                    OptimizeResult: The SLSQP result with compatibility constraints.
+                """
                 N = len(r)
                 # Null perturbation has boundary box; all other coordinates propagated by A.
                 indexes = np.arange(K) * (J + 1) + J
@@ -679,6 +901,25 @@ def continuous(
     local=False,
     probabilities=False,
 ):
+    """Simulate continuous histories and their crossing-cell outcomes.
+
+    Args:
+        n (int): Number of patients to generate.
+        rng (np.random.Generator): Generator for covariates, innovations, and outcomes.
+        K (int): Number of follow-up visits.
+        d (int): Number of baseline covariates; at least five are required.
+        a (int): Baseline treatment arm.
+        rho (float): Correlation between the two within-visit innovations.
+        c0 (float): Intercept of the visit-specific rescue threshold.
+        local (bool): Whether to truncate biomarker innovations below the threshold.
+        probabilities (bool): Whether to return conditional means instead of draws.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: Crossing-cell indices, protocol
+            outcomes, and no-rescue outcomes. Index 4*K denotes no crossing.
+            With probabilities=True, the last two arrays contain conditional means;
+            otherwise, a common uniform couples the two binary outcomes.
+    """
     W = rng.normal(size=(n, d))
     for j in range(1, d):
         W[:, j] = 0.35 * W[:, j - 1] + np.sqrt(1 - 0.35**2) * W[:, j]
@@ -724,6 +965,16 @@ def continuous(
 
 
 def summarize(rows: list[dict], groupkeys: list[str]) -> list[dict]:
+    """Summarize selected simulation metrics within each group of records.
+
+    Args:
+        rows (list[dict]): Replication-level results; empty or None metrics are omitted.
+        groupkeys (list[str]): Columns defining the groups to summarize.
+
+    Returns:
+        list[dict]: Group identifiers, replication counts, metric means and Monte
+            Carlo standard errors, with exact binomial intervals for selected flags.
+    """
     groups = {}
     for r in rows:
         groups.setdefault(tuple(r[k] for k in groupkeys), []).append(r)
@@ -757,7 +1008,7 @@ def summarize(rows: list[dict], groupkeys: list[str]) -> list[dict]:
                     "primitive_cover",
                     "empty_rare",
                 ]:
-                    k = int(round(z.sum()))
+                    k = round(z.sum())
                     nn = len(z)
                     o[name + "_mc_lower"] = 0.0 if k == 0 else float(beta.ppf(0.025, k, nn - k + 1))
                     o[name + "_mc_upper"] = (
@@ -810,6 +1061,14 @@ def kl_counts_scalar(k: int, n: int, alpha: float = 0.05, D: int = 1):
         return max(0.0, np.exp(-r) - 1e-12), 1.0
 
     def f(p):
+        """Evaluate the Bernoulli-KL constraint at a candidate probability.
+
+        Args:
+            p (float): Candidate probability strictly between zero and one.
+
+        Returns:
+            float: KL divergence from the empirical probability minus its threshold.
+        """
         return xlogy(x, x) - x * np.log(p) + xlogy(1 - x, 1 - x) - (1 - x) * np.log1p(-p) - r
 
     lo = brentq(f, np.nextafter(0.0, 1.0), x, xtol=1e-14)
@@ -818,6 +1077,19 @@ def kl_counts_scalar(k: int, n: int, alpha: float = 0.05, D: int = 1):
 
 
 def primitive_box(F, method, alpha=0.05, D=None):
+    """Construct coordinate-wise confidence limits for observed feature means.
+
+    Args:
+        F (np.ndarray): An (n, d) matrix of feature values in [0, 1].
+        method (str): Limit construction: cp, kl, eb, hoeffding, or wald.
+            The cp and kl methods require binary coordinates.
+        alpha (float): Total error probability allocated across coordinates.
+        D (int | None): Number of protected coordinates; defaults to F.shape[1].
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: Empirical means, lower limits,
+            and upper limits, each with one entry per feature.
+    """
     F = np.asarray(F, float)
     n, dd = F.shape
     if n < 1 or dd < 1 or not np.all(np.isfinite(F)):
@@ -829,7 +1101,7 @@ def primitive_box(F, method, alpha=0.05, D=None):
     if method == "cp":
         lo, hi = cp_counts(F.sum(0), n, alpha, D)
     elif method == "kl":
-        limits = np.array([kl_counts_scalar(int(round(k)), n, alpha, D) for k in F.sum(0)])
+        limits = np.array([kl_counts_scalar(round(k), n, alpha, D) for k in F.sum(0)])
         lo, hi = limits[:, 0], limits[:, 1]
     else:
         _, lo, hi = moment_box(F, method, alpha=alpha, total_D=D)
@@ -837,6 +1109,22 @@ def primitive_box(F, method, alpha=0.05, D=None):
 
 
 def cell_region(F, method, alpha=0.05, extra_D=0):
+    """Protect cell moments and two aggregate moments under one error allocation.
+
+    Args:
+        F (np.ndarray): Feature matrix ordered as outcome, M crossing indicators,
+            and M cell-specific outcome contributions.
+        method (str): Primitive limit construction, or hybrid_eb_cp or
+            hybrid_hoeffding_cp to use CP limits only for probability features.
+        alpha (float): Total error probability for the simultaneous limits.
+        extra_D (int): Additional protected coordinates included in the allocation.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: Original
+            feature means and lower/upper limits, followed by aggregate lower/upper
+            limits for total crossing probability and the noncrossing outcome mean
+            contribution, in that order.
+    """
     M = (F.shape[1] - 1) // 2
     ag = np.column_stack([F[:, 1: 1 + M].sum(1), F[:, 0] - F[:, 1 + M:].sum(1)])  # fmt: skip
     allf = np.column_stack([F, ag])
@@ -919,6 +1207,19 @@ def signed_budget_exact(mu, p, b, gamma=0.2):
 
 
 def exact_population(pop, kind):
+    """Return analytic population endpoints for the requested sensitivity model.
+
+    Args:
+        pop (dict): Population moments with keys ``p``, ``b``, and ``mu``,
+            plus ``tau`` for calibration or ``b0`` for Tan's model.
+        kind (str): One of ``range``, ``signed``, ``delta``, ``budget``,
+            ``calibrated``, or ``tan`` followed by a density-ratio radius.
+            The delta and budget models use a radius of 0.2.
+
+    Returns:
+        tuple[float, float]: The lower and upper population endpoints.
+            The calibrated formula requires inactive outcome caps.
+    """
     p, b, mu = pop["p"], pop["b"], pop["mu"]
     if kind == "range":
         return mu - b.sum(), mu - b.sum() + p.sum()
@@ -967,6 +1268,16 @@ def tan_recursion(e, q, lam):
 
 
 def tan_population(pop, lam):
+    """Compute Tan's time-only endpoints from population probabilities.
+
+    Args:
+        pop (dict): Population moments with crossing masses ``p`` and
+            noncrossing outcome mass ``b0``.
+        lam (float): The finite density-ratio radius, at least one.
+
+    Returns:
+        tuple[float, float]: The lower and upper population endpoints.
+    """
     p = pop["p"]
     s = 1 - np.r_[0, np.cumsum(p)]
     e = s[1:] / s[:-1]
@@ -989,6 +1300,19 @@ def tan_interval(cell, y, M, lam, alpha=0.05):
 
 
 def tan_minimum_lambda(pop):
+    """Return the smallest time-only density-ratio radius covering the population.
+
+    Args:
+        pop (dict): Population moments with crossing masses ``p``, rescued
+            outcome means ``qR``, no-rescue shifts ``tau``, noncrossing outcome
+            mass ``b0``, and noncrossing probability ``p0``. Conditional outcome
+            probabilities must lie strictly between zero and one.
+
+    Returns:
+        float: The maximum ratio, in either direction, of success and failure
+            probabilities between each crossing group and its later survivors,
+            bounded below by one.
+    """
     p = pop["p"]
     q = pop["qR"] + pop["tau"]
     future = pop["b0"]
@@ -1074,8 +1398,12 @@ def bootstrap_budget(cell, y, M, rng, B=999, alpha=0.05):
     cell, y = np.asarray(cell), np.asarray(y, dtype=float)
     n = len(y)
     if (
-        n < 1 or cell.shape != y.shape or y.ndim != 1 or B < 1
-        or not np.all(np.isfinite(y)) or np.any((y < 0) | (y > 1))
+        n < 1
+        or cell.shape != y.shape
+        or y.ndim != 1
+        or B < 1
+        or not np.all(np.isfinite(y))
+        or np.any((y < 0) | (y > 1))
         or np.any((cell < 0) | (cell > M) | (cell != np.floor(cell)))
     ):
         raise ValueError("Bootstrap requires bounded patient outcomes and valid crossing cells.")
@@ -1103,9 +1431,9 @@ def bootstrap_budget(cell, y, M, rng, B=999, alpha=0.05):
             sums = np.bincount(
                 codes.ravel(), weights=sampled_y.ravel(), minlength=size * (M + 1)
             ).reshape(size, M + 1)
-            pp[start: start + size] = counts[:, :M] / n
-            bb[start: start + size] = sums[:, :M] / n
-            mm[start: start + size] = sampled_y.mean(1)
+            pp[start: start + size] = counts[:, :M] / n  # fmt: skip
+            bb[start: start + size] = sums[:, :M] / n  # fmt: skip
+            mm[start: start + size] = sampled_y.mean(1)  # fmt: skip
         p = np.bincount(cell, minlength=M + 1)[:M] / n
         b = np.bincount(cell, weights=y, minlength=M + 1)[:M] / n
         mu = y.mean()
@@ -1135,7 +1463,10 @@ def crossing_history_masses(K, J, alpha, arm):
             )
             ker /= ker.sum()
             if k < K - 1:
-                nxt.extend((float(l), float(pr * (1 - hit) * q)) for l, q in zip(states, ker))
+                nxt.extend(
+                    (float(next_state), float(pr * (1 - hit) * q))
+                    for next_state, q in zip(states, ker)
+                )
         paths = nxt
     return np.asarray(masses), np.asarray(cells)
 
@@ -1198,6 +1529,23 @@ def completion_audit(K, J, rescue=0.5, mesh=1 / 64):
 
 
 def append_result(rows, key, kind, method, interval, truth, target, **extra):
+    """Append interval endpoints and simulation performance measures to the rows.
+
+    Failed or invalid intervals are replaced by the full outcome range [0, 1].
+
+    Args:
+        rows (list[dict]): The result rows to update in place.
+        key (dict): Identifiers for the simulation setting and repetition.
+        kind (str): The sensitivity model label.
+        method (str): The estimation method label.
+        interval (tuple[float, float]): The estimated lower and upper endpoints.
+        truth (tuple[float, float]): The true identified-set endpoints.
+        target (float): The target value used to evaluate point coverage.
+        **extra: Additional result fields, optionally including ``failure``.
+
+    Returns:
+        None: The result is appended to ``rows``.
+    """
     L, U = map(float, interval)
     tl, tu = truth
     fail = int(extra.pop("failure", 0))
@@ -1225,6 +1573,15 @@ def append_result(rows, key, kind, method, interval, truth, target, **extra):
 
 
 def obs_design(W: np.ndarray, interactions: bool = True) -> np.ndarray:
+    """Build the logistic design matrix from centered baseline covariates.
+
+    Args:
+        W (np.ndarray): Baseline covariates with shape (n, 5).
+        interactions (bool): Whether to include the two specified interaction terms.
+
+    Returns:
+        np.ndarray: Intercept, centered covariates, and optional interactions.
+    """
     x = np.asarray(W, float) - 0.5
     z = np.column_stack([np.ones(len(x)), x])
     if interactions:
@@ -1233,6 +1590,15 @@ def obs_design(W: np.ndarray, interactions: bool = True) -> np.ndarray:
 
 
 def obs_propensity(W: np.ndarray, scenario: str) -> np.ndarray:
+    """Return the true treatment probabilities for an observational scenario.
+
+    Args:
+        W (np.ndarray): Baseline covariates with shape (n, 5).
+        scenario (str): Either "linear" or "nonlinear" for the propensity logit.
+
+    Returns:
+        np.ndarray: Conditional probabilities of treatment arm one, with shape (n,).
+    """
     x = np.asarray(W, float) - 0.5
     v = -0.1 + 0.8 * x[:, 0] - 0.6 * x[:, 1] + 0.4 * x[:, 2]
     if scenario == "nonlinear":
@@ -1275,13 +1641,27 @@ def obs_conditional(al: float, W: np.ndarray, arm: int, K=5, s=4) -> dict:
     survq = expit(-0.2 + 0.6 * states[None, :] / (s - 1) + baseline[:, None] - 0.2 * arm)
     b0 = (mass * survq).sum(1)
     p0 = mass.sum(1)
-    return dict(p=p, p0=p0, b0=b0, qR=qr, tau=tau, mu=(p * qr).sum(1) + b0)
+    return {"p": p, "p0": p0, "b0": b0, "qR": qr, "tau": tau, "mu": (p * qr).sum(1) + b0}
 
 
 def observational_population() -> dict:
+    """Construct the observational population with an average rescue rate of 0.5.
+
+    Returns:
+        dict: The 32 baseline patterns, calibrated intercept, conditional moments,
+            and marginal population moments for each treatment arm.
+    """
     W = np.array(list(itertools.product([0.0, 1.0], repeat=5)))
 
     def rate(al):
+        """Average the rescue probability over baseline patterns and both arms.
+
+        Args:
+            al (float): The rescue-model intercept.
+
+        Returns:
+            float: The equally weighted average rescue probability.
+        """
         return sum(obs_conditional(al, W, a)["p"].sum() / len(W) for a in [0, 1]) / 2
 
     al = brentq(lambda z: rate(z) - 0.5, -15, 15, xtol=1e-12)
@@ -1311,6 +1691,18 @@ def observational_population() -> dict:
 
 
 def draw_observational(pop: dict, n: int, scenario: str, rng) -> dict:
+    """Draw observational data with coupled observed and no-rescue outcomes.
+
+    Args:
+        pop (dict): Population returned by observational_population.
+        n (int): The number of individuals to draw.
+        scenario (str): The "linear" or "nonlinear" propensity scenario.
+        rng (np.random.Generator): The random number generator.
+
+    Returns:
+        dict: Baselines W, treatment A, true propensity e, crossing cell (5 means
+            no crossing), observed outcome y, and no-rescue outcome ynr.
+    """
     wi = rng.integers(0, len(pop["W"]), n)
     W = pop["W"][wi]
     e = obs_propensity(W, scenario)
@@ -1341,17 +1733,52 @@ def draw_observational(pop: dict, n: int, scenario: str, rng) -> dict:
 
 
 def fitted_logit(W, A, interactions=True):
+    """Fit the logistic propensity model and reject numerically irregular fits.
+
+    Args:
+        W (np.ndarray): Baseline covariates with shape (n, 5).
+        A (np.ndarray): Binary treatment assignments with shape (n,).
+        interactions (bool): Whether to include the two baseline interactions.
+
+    Returns:
+        tuple: Propensities clipped to [0.02, 0.98], raw propensities, design
+            matrix, mean information matrix, and fitted coefficient vector.
+    """
     X = obs_design(W, interactions)
     n = len(A)
 
     def fun(beta_):
+        """Evaluate the mean logistic negative log likelihood.
+
+        Args:
+            beta_ (np.ndarray): Coefficient vector matching the design columns.
+
+        Returns:
+            float: The mean negative log likelihood.
+        """
         v = X @ beta_
         return float(np.mean(np.logaddexp(0, v) - A * v))
 
     def jac(beta_):
+        """Evaluate the gradient of the mean logistic negative log likelihood.
+
+        Args:
+            beta_ (np.ndarray): Coefficient vector matching the design columns.
+
+        Returns:
+            np.ndarray: Gradient vector with one entry per coefficient.
+        """
         return X.T @ (expit(X @ beta_) - A) / n
 
     def hess(beta_):
+        """Evaluate the Hessian of the mean logistic negative log likelihood.
+
+        Args:
+            beta_ (np.ndarray): Coefficient vector matching the design columns.
+
+        Returns:
+            np.ndarray: The square mean information matrix.
+        """
         e = expit(X @ beta_)
         return X.T @ ((e * (1 - e))[:, None] * X) / n
 
@@ -1423,6 +1850,17 @@ def coherent_projection(mean, M):
 
 
 def add_aggregates(F, M):
+    """Append aggregate crossing and noncrossing outcome features.
+
+    Args:
+        F (np.ndarray): Outcome, M crossing indicators, and M crossing outcome
+            products, with shape (n, 1 + 2 * M).
+        M (int): The number of crossing cells.
+
+    Returns:
+        np.ndarray: Features with aggregate crossing and noncrossing outcome
+            columns appended, with shape (n, 3 + 2 * M).
+    """
     return np.column_stack([F, F[:, 1: 1 + M].sum(1), F[:, 0] - F[:, 1 + M:].sum(1)])  # fmt: skip
 
 
@@ -1494,6 +1932,16 @@ def ipw_analysis(dat, pop, method, propensity, fit=None, known_bound=None, gamma
 
 
 def summarize_extended(rows, groupkeys):
+    """Summarize simulation groups with additional error and diagnostic metrics.
+
+    Args:
+        rows (list[dict]): Per-replication simulation results.
+        groupkeys (list[str]): Fields identifying each simulation group.
+
+    Returns:
+        list[dict]: Standard summaries plus means, Monte Carlo standard errors,
+            and root mean squares for available finite diagnostic values.
+    """
     out = summarize(rows, groupkeys)
     groups = {}
     for r in rows:
@@ -1570,6 +2018,17 @@ def continuous_details(n, rng, K=5, d=5, a=0, rho=0.35, c0=0.6):
 
 
 def partition_cells(dat, M, K=5):
+    """Assign crossing cells by visit and baseline normal-quantile bin.
+
+    Args:
+        dat (dict): Continuous data containing first-crossing labels T and
+            baseline covariates W.
+        M (int): The number of crossing cells; either 1 or a multiple of K.
+        K (int): The number of visits and the no-crossing label in T.
+
+    Returns:
+        np.ndarray: Integer cell labels, with M reserved for no crossing.
+    """
     T = dat["T"]
     hit = T < K
     if M == 1:
@@ -1583,6 +2042,17 @@ def partition_cells(dat, M, K=5):
 
 
 def partition_outcomes(dat, cap=False, K=5):
+    """Copy outcome probabilities and optionally impose the near-cap scenario.
+
+    Args:
+        dat (dict): Continuous data containing qR, q0, crossing labels T, and W.
+        cap (bool): Whether to set qR to 0.98 and q0 to 0.99 among crossing
+            individuals whose first baseline covariate is nonnegative.
+        K (int): The number of visits and the no-crossing label in T.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Observed and no-rescue outcome probabilities.
+    """
     qr = dat["qR"].copy()
     q0 = dat["q0"].copy()
     if cap:
