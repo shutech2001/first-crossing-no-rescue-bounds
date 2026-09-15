@@ -28,13 +28,22 @@ from extensions import (
     run_extension_job,
     run_preparation_job,
 )
+from joint_benchmark import joint_jobs, joint_protocol, run_joint_job
 from report_experiments import generate_reports
 from simulations import core_jobs, deterministic_audits, run_core_job
-from joint_benchmark import joint_jobs, joint_protocol, run_joint_job
 
 SRC_DIR = Path(__file__).resolve().parent
 ROOT = SRC_DIR.parent
-SUITES = ("core", "rare", "continuous", "continuous_outcome", "observational", "partitions", "gamma", "joint")
+SUITES = (
+    "core",
+    "rare",
+    "continuous",
+    "continuous_outcome",
+    "observational",
+    "partitions",
+    "gamma",
+    "joint",
+)
 DATA_ARCHIVE = "simulation_data.zip"
 COMPUTATION_FILES = (
     "experiments.py",
@@ -44,7 +53,15 @@ COMPUTATION_FILES = (
     "joint_benchmark.py",
     "joint_regions.py",
 )
-RESULT_DIRECTORIES = ("core", "gamma", "continuous", "continuous_outcome", "observational", "partitions", "joint")
+RESULT_DIRECTORIES = (
+    "core",
+    "gamma",
+    "continuous",
+    "continuous_outcome",
+    "observational",
+    "partitions",
+    "joint",
+)
 _THREAD_LIMITS: threadpool_limits | None = None
 
 
@@ -111,12 +128,18 @@ def prepare_checkpoints(out: Path, cfg: dict) -> None:
                 "Existing results found. Use --report-only to regenerate figures and "
                 "tables, or a new --out directory for another simulation run."
             )
-        atomic_json(control, {
-            "config": cfg, "signature": signature, "sources": sources,
-            "full_protocol": full_protocol(cfg),
-            "numpy_version": np.__version__, "scipy_version": scipy.__version__,
-            "joint_protocol": joint_protocol(cfg) if "joint" in cfg["suites"] else None,
-        })
+        atomic_json(
+            control,
+            {
+                "config": cfg,
+                "signature": signature,
+                "sources": sources,
+                "full_protocol": full_protocol(cfg),
+                "numpy_version": np.__version__,
+                "scipy_version": scipy.__version__,
+                "joint_protocol": joint_protocol(cfg) if "joint" in cfg["suites"] else None,
+            },
+        )
     # Capture the executed source before any simulations. A later edit while a
     # long run is active must not replace this source in the completed archive.
     snapshots = checkpoints / "source"
@@ -147,16 +170,18 @@ class StudyProgress(tqdm):
         tqdm: The progress bar.
     """
 
-    def update(self, n: int = 1) -> None:
+    def update(self, n: float | None = 1) -> bool | None:
         """Update the progress bar.
 
         Args:
-            n (int): The number of units to update.
+            n: The number of units to update.
 
         Returns:
-            None: The number of units updated.
+            True if a display was triggered.
         """
         if self.disable:
+            if n is None:
+                n = self.n - self.last_print_n
             self.n += n
             return None
         return super().update(n)
@@ -467,8 +492,9 @@ def materialize(out: Path) -> dict[str, int]:
         for f in handles.values():
             f.close()
         archive_path = temporary / DATA_ARCHIVE
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED,
-                             compresslevel=6, allowZip64=True) as archive:
+        with zipfile.ZipFile(
+            archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
+        ) as archive:
             for name in schemas:
                 archive.write(temporary / name, name)
             control = out / "checkpoints" / "run.json"
@@ -482,14 +508,20 @@ def materialize(out: Path) -> dict[str, int]:
             records = []
             for path in paths:
                 result = read_checkpoint(path)
-                records.append({k: v for k, v in result.items()
-                                if k not in ("files", "context", "samples")})
+                records.append(
+                    {k: v for k, v in result.items() if k not in ("files", "context", "samples")}
+                )
                 if result.get("context"):
-                    archive.writestr("references/" + result["id"] + ".json",
-                                     json.dumps(result["context"], default=json_default))
+                    archive.writestr(
+                        "references/" + result["id"] + ".json",
+                        json.dumps(result["context"], default=json_default),
+                    )
                 if result.get("sample_file"):
-                    archive.write(path.parent / Path(result["sample_file"]).name,
-                                  result["sample_file"], compress_type=zipfile.ZIP_STORED)
+                    archive.write(
+                        path.parent / Path(result["sample_file"]).name,
+                        result["sample_file"],
+                        compress_type=zipfile.ZIP_STORED,
+                    )
             archive.writestr("jobs.json", json.dumps(records, default=json_default))
         with zipfile.ZipFile(archive_path) as archive:
             damaged = archive.testzip()
@@ -594,8 +626,14 @@ def make_config(args: argparse.Namespace) -> dict:
         if value is not None:
             cfg[name] = value
     if args.reps is not None:
-        for name in ("finite_reps", "observational_reps", "continuous_reps", "partition_reps",
-                     "joint_reps", "continuous_outcome_reps"):
+        for name in (
+            "finite_reps",
+            "observational_reps",
+            "continuous_reps",
+            "partition_reps",
+            "joint_reps",
+            "continuous_outcome_reps",
+        ):
             if getattr(args, name, None) is None:
                 cfg[name] = args.reps
     cfg["suites"] = list(dict.fromkeys(cfg["suites"]))
@@ -766,7 +804,10 @@ def main(argv: list[str] | None = None) -> None:
             run_jobs([*core, *ext, *joint], out, args.workers, progress)
             if progress.n != total:
                 raise RuntimeError(f"Incomplete progress: {progress.n}/{total}")
-        print("Saving simulation_data.zip (replications, samples, references and run settings)...", flush=True)
+        print(
+            "Saving simulation_data.zip (replications, samples, references and run settings)...",
+            flush=True,
+        )
         materialize(out)
         # The verified archive contains all results and samples. Reporting no
         # longer depends on checkpoints, including when rendering is deferred.
