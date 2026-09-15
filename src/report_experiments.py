@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import io
+import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,8 @@ METHOD_STYLE = {
     "wald": 4,
     "bootstrap": 5,
     "aggregate_cp": 6,
+    "joint_split": 1,
+    "joint_lr": 2,
     "oracle_eb": 0,
     "oracle_wald": 1,
     "logit_naive": 2,
@@ -61,6 +65,14 @@ METHOD_STYLE = {
 
 
 def curve_style(index: int) -> dict:
+    """Get the curve style.
+
+    Args:
+        index (int): The index.
+
+    Returns:
+        dict: The curve style.
+    """
     return {
         "color": CURVE_COLORS[index],
         "marker": CURVE_MARKERS[index],
@@ -77,6 +89,8 @@ METHODS = {
     "hoeffding": "Hoeffding",
     "wald": "Wald",
     "aggregate_cp": "Aggregate CP",
+    "joint_split": "Joint split",
+    "joint_lr": "Joint LR",
     "bootstrap": "Endpoint bootstrap",
     "endpoint_cp": "Endpoint CP",
     "conditional_cp": "Conditional CP",
@@ -90,6 +104,8 @@ METHODS = {
     "rf_cf_naive": "Forest naive",
     "rf_cf_eb": "Forest EB",
     "cp_eb": "CP + external EB",
+    "hybrid_eb_cp": "Hybrid EB--CP",
+    "hybrid_hoeffding_cp": "Hybrid Hoeffding--CP",
 }
 SCIENCE = {
     "range": "Range only",
@@ -115,7 +131,19 @@ BINARY = {
     "set_cover_inward",
     "reference_inward_nonempty",
     "primitive_region_fallback",
+    "fallback",
+    "exhausted",
+    "lower_exhausted",
+    "upper_exhausted",
+    "lower_fallback",
+    "upper_fallback",
+    "unavailable_certificate",
+    "empty_program",
+    "refinement_limit",
+    "stopping_limit",
 }
+JOINT_METHODS = ("cp", "joint_split", "joint_lr", "aggregate_cp")
+JOINT_SETTINGS = {"reference": "Reference", "active_caps": "Active caps"}
 REPLICATION_SOURCES = {
     "interval": (
         "core/interval_replications.csv",
@@ -134,19 +162,19 @@ REPLICATION_SOURCES = {
     ),
     "partition": ("partitions/partition_replications.csv", ["cap", "n", "M", "method"]),
     "gamma": ("gamma/gamma_replications.csv", ["n", "gamma", "model_contains_truth", "method"]),
+    "joint": ("joint/replications.csv", ["setting", "n", "method"]),
+    "continuous_outcome": (
+        "continuous_outcome/continuous_outcome_replications.csv", ["n", "method"],
+    ),
 }
 REFERENCE_SOURCES = {
     "population": "core/population_regions.csv",
-    "geometry": "core/geometry.csv",
+    "relaxation": "core/relaxation_audit.csv",
     "completion": "core/completion_audit.csv",
     "mesh": "core/mesh_audit.csv",
-    "tan": "core/tan_audit.csv",
     "curves": "core/sensitivity_curves.csv",
     "continuous": "continuous/continuous_oracles.csv",
-    "continuous_batches": "continuous/continuous_oracle_batches.csv",
     "partition_oracle": "partitions/partition_oracles.csv",
-    "partition_batches": "partitions/partition_oracle_batches.csv",
-    "observational_population": "observational/observational_population.csv",
 }
 
 
@@ -154,7 +182,7 @@ TABLE_NAMES = frozenset(
     {
         "scientific",
         "inference",
-        "reduction-checks",
+        "continuous-outcome",
         "completion",
         "mesh",
         "atomic-kl",
@@ -168,11 +196,20 @@ TABLE_NAMES = frozenset(
         "rare-upper",
         "external-precision",
         "radius-grid",
+        "joint-regions",
     }
 )
 
 
 def number(value: Any) -> float:
+    """Convert a value to a number.
+
+    Args:
+        value (Any): The value.
+
+    Returns:
+        float: The number.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -180,6 +217,14 @@ def number(value: Any) -> float:
 
 
 def parse(value: str) -> Any:
+    """Parse a value.
+
+    Args:
+        value (str): The value.
+
+    Returns:
+        Any: The parsed value.
+    """
     if value == "":
         return None
     if value in ("True", "False"):
@@ -194,31 +239,42 @@ def parse(value: str) -> Any:
 
 
 def read_csv(path: Path) -> list[dict]:
+    """Read a CSV file.
+
+    Args:
+        path (Path): The path.
+
+    Returns:
+        list[dict]: The rows.
+    """
     if not path.exists() or path.stat().st_size == 0:
         return []
     with path.open(newline="") as stream:
         return [{k: parse(v) for k, v in row.items()} for row in csv.DictReader(stream)]
 
 
-def write_csv(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    keys = list(dict.fromkeys(k for row in rows for k in row))
-    with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def select(rows: Iterable[dict], **criteria: Any) -> list[dict]:
+    """Select rows from a list of dictionaries.
+
+    Args:
+        rows (Iterable[dict]): The rows.
+        criteria (dict): The criteria.
+
+    Returns:
+        list[dict]: The selected rows.
+    """
     return [r for r in rows if all(r.get(k) == v for k, v in criteria.items())]
 
 
 def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
-    """Keep all generated replications; report missing diagnostic denominators.
+    """Summarize the rows.
 
-    Coverage of unavailable primitive regions is counted as non-coverage. Other
-    undefined diagnostics remain missing and have an explicit observation count.
-    With one replication its standard error is undefined, never reported as zero.
+    Args:
+        rows (list[dict]): The rows.
+        keys (list[str]): The keys.
+
+    Returns:
+        list[dict]: The summaries.
     """
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
@@ -240,6 +296,12 @@ def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
             if col == "primitive_cover":
                 vals = np.where(np.isfinite(vals), vals, 0.0)
             finite = vals[np.isfinite(vals)]
+            if col in {"iterations", "fallback_count"} or col.endswith(
+                ("_gap", "_likelihood_violation", "_iterations")
+            ):
+                observed = vals[~np.isnan(vals)]
+                if len(observed):
+                    out[col + "_max"] = float(observed.max())
             if not len(finite):
                 continue
             out[col] = float(finite.mean())
@@ -259,6 +321,8 @@ def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
                 out[col + "_mc_upper"] = 1.0 if k == n else float(beta.ppf(0.975, k + 1, n - k))
             if col.endswith("error"):
                 out[col + "_rmse"] = float(np.sqrt(np.mean(finite**2)))
+            if col == "fallback_count":
+                out[col + "_sum"] = float(finite.sum())
         summaries.append(out)
     return sorted(
         summaries,
@@ -270,6 +334,14 @@ def summarize(rows: list[dict], keys: list[str]) -> list[dict]:
 
 
 def tex_escape(value: Any) -> str:
+    """Escape a value for LaTeX.
+
+    Args:
+        value (Any): The value.
+
+    Returns:
+        str: The escaped value.
+    """
     mapping = {
         "\\": r"\textbackslash{}",
         "&": r"\&",
@@ -285,36 +357,66 @@ def tex_escape(value: Any) -> str:
     return "".join(mapping.get(c, c) for c in str(value))
 
 
-def fmt(value: Any, digits: int = 4) -> str:
+def fmt(value: Any, *, integer: bool = False, scientific: bool = False) -> str:
+    """Use three significant digits, retaining trailing zeros.
+
+    Exact counts remain integers. Small values use a two-decimal mantissa;
+    rounding the mantissa first keeps powers of ten normalized at boundaries.
+    """
     x = number(value)
     if not math.isfinite(x):
         return "--"
-    if digits == 0:
+    if integer:
         return f"${int(round(x))}$"
-    return f"${x:.{digits}f}$"
+    if x == 0:
+        return "$0.00$"
+    mantissa, power = f"{x:.2e}".split("e")
+    exponent = int(power)
+    if scientific or exponent < -3 or exponent >= 3:
+        return rf"${mantissa}\times 10^{{{exponent}}}$"
+    return f"${x:.{max(0, 2 - exponent)}f}$"
 
 
 def sci(value: Any) -> str:
-    x = number(value)
-    if not math.isfinite(x):
-        return "--"
-    if x == 0:
-        return "$0$"
-    exponent = math.floor(math.log10(abs(x)))
-    return rf"${x / 10 ** exponent:.2f}\times 10^{{{exponent}}}$"
+    """Use the same three significant digits in scientific notation."""
+    return fmt(value, scientific=True)
 
 
 def mc_interval(row: dict, metric: str = "set_cover") -> str:
-    lower = fmt(row.get(metric + "_mc_lower"), 3).strip("$")
-    upper = fmt(row.get(metric + "_mc_upper"), 3).strip("$")
+    """Format a Monte Carlo interval.
+
+    Args:
+        row (dict): The row.
+        metric (str, optional): The metric. Defaults to "set_cover".
+
+    Returns:
+        str: The formatted interval.
+    """
+    lower = fmt(row.get(metric + "_mc_lower")).strip("$")
+    upper = fmt(row.get(metric + "_mc_upper")).strip("$")
     return f"$[{lower}, {upper}]$"
 
 
 class Report:
-    def __init__(self, archive: Path, figures: Path, tables: Path):
+    """A report.
+
+    Args:
+        archive (Path): The archive.
+        figures (Path): The figures.
+        tables (Path): The tables.
+    """
+
+    def __init__(self, archive: Path, figures: Path, tables: Path) -> None:
+        """Initialize the report.
+
+        Args:
+            archive (Path): The archive.
+            figures (Path): The figures.
+            tables (Path): The tables.
+        """
         self.archive, self.figures, self.tables = archive, figures, tables
-        self.summary_dir = archive / "summaries"
-        for path in (figures, tables, self.summary_dir):
+        self.bundle = archive / "simulation_data.zip"
+        for path in (figures, tables):
             path.mkdir(parents=True, exist_ok=True)
         self.raw: dict[str, list[dict]] = {}
         self.data: dict[str, list[dict]] = {}
@@ -323,15 +425,27 @@ class Report:
         for name, (source, keys) in REPLICATION_SOURCES.items():
             self.raw[name] = self.load(source)
             self.data[name] = summarize(self.raw[name], keys)
-            summary_name = "continuous" if name == "continuous_trials" else name
-            write_csv(self.summary_dir / f"{summary_name}_summary.csv", self.data[name])
         for name, source in REFERENCE_SOURCES.items():
             self.data[name] = self.load(source)
-        self.add_reference_diagnostics()
-        self.add_paired_differences()
-        self.add_precision_diagnostics()
 
     def load(self, source: str) -> list[dict]:
+        """Load the data from a source.
+
+        Args:
+            source (str): The source.
+
+        Returns:
+            list[dict]: The data.
+        """
+        if self.bundle.exists():
+            with zipfile.ZipFile(self.bundle) as bundle:
+                try:
+                    with bundle.open(source) as stream:
+                        return [{k: parse(v) for k, v in row.items()}
+                                for row in csv.DictReader(io.TextIOWrapper(stream))]
+                except KeyError:
+                    self.missing.append(source)
+                    return []
         path = self.archive / source
         if not path.exists():
             self.missing.append(source)
@@ -339,7 +453,13 @@ class Report:
         return read_csv(path)
 
     def table(self, name: str, headers: list[str], body: list[list[str]]) -> None:
-        """Write a manuscript-ready tabular fragment, without a table wrapper."""
+        """Write a manuscript-ready tabular fragment, without a table wrapper.
+
+        Args:
+            name (str): The name.
+            headers (list[str]): The headers.
+            body (list[list[str]]): The body.
+        """
         if name not in TABLE_NAMES:
             raise ValueError(f"Un-requested manuscript table: {name}")
         textual = {
@@ -349,6 +469,8 @@ class Report:
             "Outcome law",
             "External sample size",
             "True-law member",
+            "External calibration",
+            "Input-region construction",
         }
         alignment = "".join("l" if h in textual else "r" for h in headers)
         text = [
@@ -369,157 +491,12 @@ class Report:
         path.write_text("\n".join(text))
         self.artifacts.append(str(path))
 
-    def add_reference_diagnostics(self) -> None:
-        rows = []
-        for row in self.raw["partition"]:
-            ref = select(self.data["partition_oracle"], cap=row.get("cap"), M=row.get("M"))
-            if not ref:
-                continue
-            p = ref[0]
-            lo, hi = number(row.get("lower")), number(row.get("upper"))
-            pl, pu = number(p.get("lower")), number(p.get("upper"))
-            sl, su = number(p.get("lower_mcse")), number(p.get("upper_mcse"))
-            if not np.isfinite([lo, hi, pl, pu, sl, su]).all():
-                continue
-            rows.append(
-                {
-                    **row,
-                    "reference_outward_cover": int(
-                        lo <= max(0, pl - 2.58 * sl) and hi >= min(1, pu + 2.58 * su)
-                    ),
-                    "reference_inward_cover": int(lo <= pl + 2.58 * sl and hi >= pu - 2.58 * su),
-                }
-            )
-        self.data["partition_reference"] = summarize(rows, ["cap", "n", "M", "method"])
-        write_csv(self.summary_dir / "partition_reference_replications.csv", rows)
-        write_csv(
-            self.summary_dir / "partition_reference_summary.csv", self.data["partition_reference"]
-        )
-        for source, keys in [
-            ("continuous_batches", ["K", "d", "rho"]),
-            ("partition_batches", ["cap", "M"]),
-        ]:
-            batches = [
-                {**r, "width": number(r.get("upper")) - number(r.get("lower"))}
-                for r in self.data[source]
-            ]
-            sums = summarize(batches, keys)
-            for row in sums:
-                row["oracle_batches"] = row.pop("replications")
-            write_csv(self.summary_dir / f"{source}_summary.csv", sums)
-
-    def add_paired_differences(self) -> None:
-        rows = []
-        for source, axes, varying, baseline in [
-            ("interval", ["design", "rescue", "arm", "n", "rep", "kind"], "method", "cp"),
-            ("continuous_trials", ["design", "rescue", "arm", "n", "rep", "kind"], "method", "cp"),
-            ("observational", ["scenario", "n", "rep"], "method", "oracle_eb"),
-            ("partition", ["cap", "n", "rep", "method"], "M", 80),
-        ]:
-            groups: dict[tuple, list[dict]] = {}
-            for row in self.raw[source]:
-                groups.setdefault(tuple(row.get(k) for k in axes), []).append(row)
-            for key, group in groups.items():
-                ref = next((r for r in group if r.get(varying) == baseline), None)
-                if ref is None:
-                    continue
-                for row in group:
-                    if row.get(varying) == baseline:
-                        continue
-                    out = {
-                        "suite": source,
-                        **dict(zip(axes, key)),
-                        "comparison": str(row.get(varying)),
-                        "reference": str(baseline),
-                    }
-                    for metric in (
-                        "length",
-                        "set_cover",
-                        "plugin_error",
-                        "enlargement",
-                        "mu_error",
-                    ):
-                        a, b = number(row.get(metric)), number(ref.get(metric))
-                        if math.isfinite(a) and math.isfinite(b):
-                            out[metric + "_difference"] = a - b
-                    rows.append(out)
-        write_csv(self.summary_dir / "paired_differences.csv", rows)
-        keys = [
-            "suite",
-            "design",
-            "rescue",
-            "arm",
-            "scenario",
-            "n",
-            "kind",
-            "cap",
-            "method",
-            "comparison",
-            "reference",
-        ]
-        self.data["paired"] = summarize(rows, keys)
-        write_csv(self.summary_dir / "paired_differences_summary.csv", self.data["paired"])
-
-    def add_precision_diagnostics(self) -> None:
-        """Compare reference Monte Carlo error with trial endpoint RMSE.
-
-        A ratio above 0.1 is a transparent diagnostic threshold, not a theorem or
-        a certified statement about the accuracy of a population reference.
-        """
-        rows = []
-        for suite, summaries in (
-            ("continuous", self.data["continuous_trials"]),
-            ("partition", self.data["partition"]),
-        ):
-            for row in summaries:
-                if suite == "continuous":
-                    matches = [
-                        p
-                        for p in self.data["continuous"]
-                        if row.get("design")
-                        == f"continuous_K{int(p['K'])}_d{int(p['d'])}_rho{float(p['rho'])}"
-                    ]
-                    keys = ("design", "n", "method")
-                else:
-                    matches = select(
-                        self.data["partition_oracle"], cap=row.get("cap"), M=row.get("M")
-                    )
-                    keys = ("cap", "M", "n", "method")
-                if not matches:
-                    continue
-                ref = matches[0]
-                out = {
-                    "suite": suite,
-                    **{k: row.get(k) for k in keys},
-                    "replications": row["replications"],
-                    "oracle_n": ref.get("oracle_n"),
-                    "heuristic_ratio_threshold": 0.1,
-                }
-                ratios = []
-                for endpoint in ("lower", "upper"):
-                    se = number(ref.get(endpoint + "_mcse"))
-                    rmse = number(row.get(endpoint + "_error_rmse"))
-                    ratio = (
-                        se / rmse
-                        if rmse > 0
-                        else float("inf") if rmse == 0 and se > 0 else float("nan")
-                    )
-                    out[endpoint + "_oracle_mcse"] = se
-                    out[endpoint + "_trial_rmse"] = rmse
-                    out[endpoint + "_ratio"] = ratio
-                    if not math.isnan(ratio):
-                        ratios.append(ratio)
-                out["nonnegligible_reference_error"] = (
-                    int(any(r > 0.1 for r in ratios)) if ratios else None
-                )
-                for name in ("theta_mcse", "psi_mcse", "supported_gap", "supported_gap_mcse"):
-                    if name in ref:
-                        out[name] = ref[name]
-                rows.append(out)
-        self.data["reference_precision"] = rows
-        write_csv(self.summary_dir / "reference_precision.csv", rows)
-
     def manuscript_tables(self) -> None:
+        """Generate the manuscript tables.
+
+        Args:
+            self (Report): The report.
+        """
         primary = select(self.data["interval"], design="finite", rescue=0.5, arm=0, n=1000)
         scientific = []
         for kind in SCIENCE:
@@ -538,7 +515,7 @@ class Report:
                     METHODS.get(r["method"], tex_escape(r["method"])),
                     fmt(r.get("sharp_width")),
                     fmt(r.get("length")),
-                    fmt(r.get("set_cover"), 3),
+                    fmt(r.get("set_cover")),
                 ]
                 for r in scientific
             ],
@@ -555,49 +532,23 @@ class Report:
                 [
                     METHODS[r["method"]],
                     fmt(r.get("length")),
-                    fmt(r.get("length_mcse"), 5),
-                    fmt(r.get("set_cover"), 3),
+                    fmt(r.get("length_mcse")),
+                    fmt(r.get("set_cover")),
                     mc_interval(r),
                 ]
                 for r in inference
             ],
         )
-        self.table(
-            "reduction-checks",
-            [
-                "$K$",
-                "$s$",
-                "Continuation",
-                "Boundary",
-                "Operator residual",
-                "Loading residual",
-                "Half-width difference",
-                "Endpoint difference",
-            ],
-            [
-                [
-                    fmt(r.get("K"), 0),
-                    fmt(r.get("J"), 0),
-                    fmt(r.get("continuation_dim"), 0),
-                    fmt(r.get("bridge_dim"), 0),
-                    sci(r.get("operator_residual")),
-                    sci(r.get("loading_residual")),
-                    sci(r.get("halfwidth_difference")),
-                    sci(r.get("constrained_endpoint_difference")),
-                ]
-                for r in self.data["geometry"]
-            ],
-        )
         completion = self.data["completion"]
         self.table(
             "completion",
-            ["$K$", "$s$", "Completion", "Boundary", "Endpoint difference", "Outward difference"],
+            ["$K$", "$s$", "Completion", "Reduced", "Endpoint difference", "Outward difference"],
             [
                 [
-                    fmt(r.get("K"), 0),
-                    fmt(r.get("J", r.get("s")), 0),
-                    fmt(r.get("completion_variables"), 0),
-                    fmt(r.get("boundary_variables"), 0),
+                    fmt(r.get("K"), integer=True),
+                    fmt(r.get("J", r.get("s")), integer=True),
+                    fmt(r.get("completion_variables"), integer=True),
+                    fmt(r.get("boundary_variables"), integer=True),
                     sci(r.get("max_endpoint_difference")),
                     sci(r.get("max_outward_difference")),
                 ]
@@ -610,8 +561,8 @@ class Report:
             [
                 [
                     rf"$1/{round(1 / number(r['mesh']))}$",
-                    fmt(r.get("budget_error"), 7),
-                    fmt(r.get("bracket_gap"), 7),
+                    fmt(r.get("budget_error")),
+                    fmt(r.get("bracket_gap")),
                     sci(r.get("inner_violation")),
                     sci(r.get("dual_gap")),
                 ]
@@ -626,12 +577,12 @@ class Report:
             ["$n$", "Plug-in error", "MC SE", "Outer width", "Enlargement", "Set coverage"],
             [
                 [
-                    fmt(r.get("n"), 0),
+                    fmt(r.get("n"), integer=True),
                     fmt(r.get("plugin_error")),
-                    fmt(r.get("plugin_error_mcse"), 5),
+                    fmt(r.get("plugin_error_mcse")),
                     fmt(r.get("length")),
                     fmt(r.get("enlargement")),
-                    fmt(r.get("set_cover"), 3),
+                    fmt(r.get("set_cover")),
                 ]
                 for r in accuracy
             ],
@@ -642,12 +593,12 @@ class Report:
             ["Rescue", "Procedure", "Sharp width", "Mean width", "MC SE", "Set coverage"],
             [
                 [
-                    fmt(r.get("rescue"), 2),
+                    fmt(r.get("rescue")),
                     METHODS.get(r.get("method"), tex_escape(r.get("method"))),
                     fmt(r.get("sharp_width")),
                     fmt(r.get("length")),
-                    fmt(r.get("length_mcse"), 5),
-                    fmt(r.get("set_cover"), 3),
+                    fmt(r.get("length_mcse")),
+                    fmt(r.get("set_cover")),
                 ]
                 for r in contrasts
             ],
@@ -680,12 +631,12 @@ class Report:
                 ],
                 [
                     [
-                        fmt(r.get("n"), 0),
+                        fmt(r.get("n"), integer=True),
                         METHODS.get(r.get("method"), tex_escape(r.get("method"))),
                         fmt(r.get("length")),
                         fmt(r.get("length_mcse")),
-                        fmt(r.get("set_cover"), 3),
-                        fmt(r.get("primitive_cover"), 3),
+                        fmt(r.get("set_cover")),
+                        fmt(r.get("primitive_cover")),
                         fmt(r.get("mu_error")),
                     ]
                     for r in obs
@@ -699,13 +650,12 @@ class Report:
             r = selected[0] if selected else {}
             cb.append(
                 [
-                    fmt(K, 0),
-                    fmt(d, 0),
-                    fmt(rho, 2),
+                    fmt(K, integer=True),
+                    fmt(d, integer=True),
+                    fmt(rho),
                     fmt(oracle.get("sharp_width")),
                     fmt(r.get("length")),
-                    f"{fmt(oracle.get('theta'), 5)} ({fmt(oracle.get('theta_mcse'), 5)})",
-                    f"{fmt(oracle.get('psi'), 5)} ({fmt(oracle.get('psi_mcse'), 5)})",
+                    f"{fmt(oracle.get('theta'))} ({fmt(oracle.get('theta_mcse'))})",
                 ]
             )
         self.table(
@@ -715,9 +665,8 @@ class Report:
                 "$d_W$",
                 r"$\rho$",
                 "Sharp width",
-                "CP width",
-                r"$\theta_0$ (oracle SE)",
-                r"$\psi_0^{\mathrm{loc}}$ (oracle SE)",
+                "Cell CP width",
+                r"$\theta_0$ (reference SE)",
             ],
             cb,
         )
@@ -727,12 +676,12 @@ class Report:
             ["Outcome law", "$M$", "Sharp width", "True norm", "Lower MC SE", "Upper MC SE"],
             [
                 [
-                    "Active caps" if r.get("cap") else "Original",
-                    fmt(r.get("M"), 0),
-                    fmt(r.get("sharp_width"), 6),
-                    fmt(r.get("gamma_true"), 6),
-                    fmt(r.get("lower_mcse"), 6),
-                    fmt(r.get("upper_mcse"), 6),
+                    "Heterogeneous caps" if r.get("cap") else "Original",
+                    fmt(r.get("M"), integer=True),
+                    fmt(r.get("sharp_width")),
+                    fmt(r.get("gamma_true")),
+                    fmt(r.get("lower_mcse")),
+                    fmt(r.get("upper_mcse")),
                 ]
                 for r in po
             ],
@@ -752,14 +701,14 @@ class Report:
             ],
             [
                 [
-                    fmt(r.get("n"), 0),
-                    fmt(r.get("M"), 0),
+                    fmt(r.get("n"), integer=True),
+                    fmt(r.get("M"), integer=True),
                     fmt(r.get("sharp_width")),
                     fmt(r.get("length")),
                     fmt(r.get("enlargement")),
                     fmt(r.get("plugin_error")),
-                    fmt(r.get("empty_fraction"), 3),
-                    fmt(r.get("set_cover"), 3),
+                    fmt(r.get("empty_fraction")),
+                    fmt(r.get("set_cover")),
                 ]
                 for r in partition
             ],
@@ -768,15 +717,15 @@ class Report:
         for expected in sorted({r["expected_count"] for r in rare}):
             by_method = {r["method"]: r for r in select(rare, expected_count=expected)}
             body.append(
-                [fmt(expected, 1), fmt(number(expected) / 1000)]
+                [fmt(expected)]
                 + [
-                    fmt(by_method.get(m, {}).get("upper_mass"), 5)
+                    fmt(by_method.get(m, {}).get("upper_mass"))
                     for m in ("cp", "kl", "eb", "hoeffding", "wald", "bootstrap")
                 ]
             )
         self.table(
             "rare-upper",
-            ["$np$", "True $p$", "CP", "KL", "Bernstein", "Hoeffding", "Wald", "Bootstrap"],
+            ["$np$", "CP", "KL", "Bernstein", "Hoeffding", "Wald", "Bootstrap"],
             body,
         )
         gamma = self.data["gamma"]
@@ -793,66 +742,129 @@ class Report:
             ],
             [
                 [
-                    fmt(r.get("n"), 0),
-                    fmt(r.get("gamma"), 2),
+                    fmt(r.get("n"), integer=True),
+                    fmt(r.get("gamma")),
                     "Yes" if r.get("model_contains_truth") else "No",
                     fmt(r.get("sharp_width")),
                     fmt(r.get("length")),
-                    fmt(r.get("set_cover"), 3),
-                    fmt(r.get("target_cover"), 3),
+                    fmt(r.get("set_cover")),
+                    fmt(r.get("target_cover")),
                 ]
                 for r in gamma
             ],
         )
-        external = select(self.data["external_radius"], experiment="external")
+        external = sorted(
+            select(self.data["external_radius"], experiment="external"),
+            key=lambda row: float("inf") if row["setting"] == -1 else row["setting"],
+        )
         self.table(
             "external-precision",
-            [
-                "External sample size",
-                "Sharp width",
-                "Mean width",
-                "MC SE",
-                "Set cov.",
-                "Target cov.",
-            ],
+            ["External calibration", "Mean width", "Set coverage"],
             [
                 [
-                    (
-                        "Exact"
-                        if r["setting"] == -1
-                        else "None" if r["setting"] == 0 else fmt(r["setting"], 0)
-                    ),
-                    fmt(r.get("sharp_width")),
+                    "Exact" if r["setting"] == -1 else "None" if r["setting"] == 0
+                    else fmt(r["setting"], integer=True),
                     fmt(r.get("length")),
-                    fmt(r.get("length_mcse"), 5),
-                    fmt(r.get("set_cover"), 3),
-                    fmt(r.get("target_cover"), 3),
+                    fmt(r.get("set_cover")),
                 ]
                 for r in external
             ],
         )
         atomic = [
-            r
-            for r in select(primary, kind="budget")
-            if r.get("method") in ("atomic_kl", "atomic_kl_aggregate", "kl", "cp")
+            row
+            for method in ("atomic_kl", "atomic_kl_aggregate", "kl", "cp")
+            for row in select(primary, kind="budget", method=method)
         ]
         self.table(
             "atomic-kl",
-            ["Procedure", "Mean width", "MC SE", "Set cov.", r"$95\%$ MC interval"],
+            ["Input-region construction", "Mean width", "Set coverage"],
             [
-                [
-                    METHODS[r["method"]],
-                    fmt(r.get("length")),
-                    fmt(r.get("length_mcse"), 5),
-                    fmt(r.get("set_cover"), 3),
-                    mc_interval(r),
-                ]
+                [METHODS[r["method"]], fmt(r.get("length")), fmt(r.get("set_cover"))]
                 for r in atomic
             ],
         )
+        continuous_outcome = [
+            row
+            for n in (250, 1000, 10000)
+            for method in ("hybrid_eb_cp", "hybrid_hoeffding_cp", "wald", "bootstrap")
+            for row in select(self.data["continuous_outcome"], n=n, method=method)
+        ]
+        self.table(
+            "continuous-outcome",
+            ["$n$", "Procedure", "Mean width", "MC SE", "Set coverage", r"$95\%$ MC interval"],
+            [
+                [
+                    fmt(r["n"], integer=True),
+                    "Cell Wald" if r["method"] == "wald" else METHODS[r["method"]],
+                    fmt(r.get("length")), fmt(r.get("length_mcse")),
+                    fmt(r.get("set_cover")), mc_interval(r),
+                ]
+                for r in continuous_outcome
+            ],
+        )
+        self.joint_table()
 
-    def figure(self, name: str, title: str, plot: Callable, rows: list[dict]) -> None:
-        # Do not silently substitute a different typeface in publication figures.
+    def joint_groups(self) -> list[tuple[str, int, list[dict]]]:
+        """Return the archived joint comparisons in benchmark setting order."""
+        groups: dict[tuple, list[dict]] = {}
+        for row in self.data["joint"]:
+            groups.setdefault((row["setting"], row["n"]), []).append(row)
+
+        def order(item):
+            (setting, n), rows = item
+            index = number(rows[0].get("setting_index"))
+            if not math.isfinite(index):
+                index = list(JOINT_SETTINGS).index(setting) if setting in JOINT_SETTINGS else 2
+            return index, n, setting
+
+        return [(setting, n, rows) for (setting, n), rows in sorted(groups.items(), key=order)]
+
+    def joint_table(self) -> None:
+        """Write the paired joint-region comparison using observed Monte Carlo summaries."""
+        lines = [
+            r"\begin{tabular}{@{}lrrrrrr@{}}",
+            r"\toprule",
+            r"Procedure & \shortstack{Mean\\width} & MC SE & Difference & "
+            r"\shortstack{Paired\\MC SE} & \shortstack{Set\\coverage} & $95\%$ MC interval \\",
+            r"\midrule",
+        ]
+        groups = self.joint_groups()
+        for i, (setting, n, rows) in enumerate(groups):
+            if i:
+                lines.append(r"\midrule")
+            label = tex_escape(JOINT_SETTINGS.get(setting, setting))
+            lines.append(rf"\multicolumn{{7}}{{l}}{{{label}, $n={n}$}} \\")
+            for method in JOINT_METHODS:
+                for row in select(rows, method=method):
+                    cells = [
+                        METHODS[method],
+                        fmt(row.get("length")),
+                        fmt(row.get("length_mcse")),
+                        fmt(row.get("width_difference_cp")),
+                        fmt(row.get("width_difference_cp_mcse")),
+                        fmt(row.get("set_cover")),
+                        mc_interval(row),
+                    ]
+                    lines.append(" & ".join(cells) + r" \\")
+        if not groups:
+            lines.append(r"\multicolumn{7}{c}{No archived records for this comparison.} \\")
+        lines.extend([r"\bottomrule", r"\end{tabular}", ""])
+        path = self.tables / "joint-regions.tex"
+        path.write_text("\n".join(lines))
+        self.artifacts.append(str(path))
+
+    def figure(
+        self, name: str, title: str, plot: Callable, rows: list[dict], *, tight_bounds: bool = False
+    ) -> None:
+        """Generate a figure.
+
+        Args:
+            name (str): The name.
+            title (str): The title.
+            plot (Callable): The plot.
+            rows (list[dict]): The rows.
+            tight_bounds (bool): Include all labels in the saved figure bounds.
+        """
         font_manager.findfont("Times New Roman", fallback_to_default=False)
         with plt.rc_context(FIGURE_STYLE):
             fig, ax = plt.subplots(figsize=(5.8, 5.4), layout="constrained")
@@ -884,6 +896,7 @@ class Report:
             path = self.figures / f"{name}.pdf"
             fig.savefig(
                 path,
+                bbox_inches="tight" if tight_bounds else None,
                 metadata={
                     "Title": title,
                     "Creator": "report_experiments.py",
@@ -906,6 +919,19 @@ class Report:
         coverage: bool = False,
         **kwargs,
     ) -> None:
+        """Plot an error curve.
+
+        Args:
+            ax (Axes): The axes.
+            rows (list[dict]): The rows.
+            x (str): The x-axis.
+            metric (str): The metric.
+            label (str): The label.
+            offset (float, optional): The offset. Defaults to 0.
+            categorical (list | None, optional): The categorical. Defaults to None.
+            coverage (bool, optional): Whether to plot coverage. Defaults to False.
+            **kwargs: Additional arguments.
+        """
         rows = sorted(rows, key=lambda r: number(r[x]))
         if not rows:
             return
@@ -934,9 +960,19 @@ class Report:
         )
 
     def manuscript_figures(self) -> None:
+        """Generate the manuscript figures.
+
+        Args:
+            self (Report): The report.
+        """
         rare = self.data["rare"]
 
         def rare_plot(ax):
+            """Plot the rare crossing strata.
+
+            Args:
+                ax (Axes): The axes.
+            """
             xs = sorted({r["expected_count"] for r in rare})
             methods = ("cp", "kl", "eb", "hoeffding", "wald", "bootstrap")
             for i, method in enumerate(methods):
@@ -964,6 +1000,11 @@ class Report:
         caps = select(self.data["interval"], design="active_caps", kind="budget")
 
         def caps_plot(ax):
+            """Plot the active outcome caps.
+
+            Args:
+                ax (Axes): The axes.
+            """
             for method in ("cp", "aggregate_cp", "bootstrap"):
                 self.error_curve(
                     ax,
@@ -1006,6 +1047,13 @@ class Report:
             rows = select(self.data["partition"], cap=cap)
 
             def partition_plot(ax, rows=rows, cap=cap):
+                """Plot the partition sensitivity.
+
+                Args:
+                    ax (Axes): The axes.
+                    rows (list[dict], optional): The rows. Defaults to rows.
+                    cap (int, optional): The cap. Defaults to cap.
+                """
                 xs = sorted({r["M"] for r in rows})
                 for i, n in enumerate(sorted({r["n"] for r in rows})):
                     self.error_curve(
@@ -1046,6 +1094,12 @@ class Report:
             rows = select(self.data["observational"], scenario=scenario)
 
             def ps_plot(ax, rows=rows):
+                """Plot the propensity sensitivity.
+
+                Args:
+                    ax (Axes): The axes.
+                    rows (list[dict], optional): The rows. Defaults to rows.
+                """
                 xs = sorted({r["n"] for r in rows})
                 methods = (
                     "oracle_eb",
@@ -1088,6 +1142,13 @@ class Report:
             rows = select(self.data["curves"], model=model)
 
             def sensitivity_plot(ax, rows=rows, model=model):
+                """Plot the sensitivity to the parameter.
+
+                Args:
+                    ax (Axes): The axes.
+                    rows (list[dict], optional): The rows. Defaults to rows.
+                    model (str, optional): The model. Defaults to model.
+                """
                 rows = sorted(rows, key=lambda r: r["parameter"])
                 x, lo, hi = ([r[key] for r in rows] for key in ("parameter", "lower", "upper"))
                 ax.fill_between(x, lo, hi, color="#3178a8", alpha=0.16)
@@ -1119,7 +1180,7 @@ class Report:
                         )
                 ax.set(
                     xlabel=(
-                        r"Bridge budget, $\Gamma$"
+                        r"Budget radius, $\Gamma$"
                         if model == "budget"
                         else r"Time-only ratio bound, $\lambda$"
                     ),
@@ -1128,21 +1189,37 @@ class Report:
 
             self.figure(
                 f"sensitivity_{model}",
-                "Bridge-effect budget" if model == "budget" else "Time-only density-ratio model",
+                "Signed-budget model" if model == "budget" else "Time-only density-ratio model",
                 sensitivity_plot,
                 rows,
             )
 
     def finish(self) -> dict:
-        # Remove only outputs generated by previous versions of this reporter.
-        for name in ("all_tables.tex", "external-radius.tex", "reference-precision.tex"):
+        """Finish the report.
+
+        Returns:
+            dict: The result.
+        """
+        for name in ("all_tables.tex", "external-radius.tex", "reference-precision.tex",
+                     "reduction-checks.tex"):
             (self.tables / name).unlink(missing_ok=True)
+        (self.figures / "joint_widths.pdf").unlink(missing_ok=True)
         return {"artifacts": self.artifacts, "missing_sources": self.missing}
 
 
 def generate_reports(
     archive: Path, figures: Path | None = None, tables: Path | None = None
 ) -> dict:
+    """Generate the reports.
+
+    Args:
+        archive (Path): The archive.
+        figures (Path | None, optional): The figures. Defaults to None.
+        tables (Path | None, optional): The tables. Defaults to None.
+
+    Returns:
+        dict: The result.
+    """
     archive = Path(archive)
     if not archive.is_dir():
         raise FileNotFoundError(f"No experiment archive found: {archive}")
@@ -1151,6 +1228,14 @@ def generate_reports(
         Path(figures) if figures is not None else archive / "figures",
         Path(tables) if tables is not None else archive / "tables",
     )
+    joint_only = bool(report.raw["joint"]) and not any(
+        rows for name, rows in report.raw.items() if name != "joint"
+    ) and not any(report.data[name] for name in REFERENCE_SOURCES)
+    if joint_only:
+        report.joint_table()
+        result = report.finish()
+        result["missing_sources"] = []
+        return result
     report.manuscript_tables()
     report.manuscript_figures()
     return report.finish()
@@ -1169,5 +1254,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
     main()

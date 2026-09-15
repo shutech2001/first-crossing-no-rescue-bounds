@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 from functools import lru_cache
+from typing import Any
 
 import numpy as np
-from scipy.stats import norm
+from numpy.typing import NDArray
+from scipy.stats import beta, norm
 
 import methods as m
 
@@ -26,7 +29,18 @@ def rng(seed: int, *keys: int) -> np.random.Generator:
 
 
 @lru_cache(None)
-def population(rescue=0.5, arm=0, states=4, caps=False):
+def population(rescue: float = 0.5, arm: int = 0, states: int = 4, caps: bool = False) -> dict:
+    """Generate a population.
+
+    Args:
+        rescue (float, optional): The rescue rate. Defaults to 0.5.
+        arm (int, optional): The arm. Defaults to 0.
+        states (int, optional): The number of states. Defaults to 4.
+        caps (bool, optional): Whether to use caps. Defaults to False.
+
+    Returns:
+        dict: The population.
+    """
     p = m.finite_population(5, states, rescue, arm)
     if caps:
         odd = np.arange(5) % 2 == 0
@@ -38,8 +52,21 @@ def population(rescue=0.5, arm=0, states=4, caps=False):
     return p
 
 
-def draw(pop, n, cfg, *keys, seed=None):
-    """Separate crossing and common outcome-uniform streams."""
+def draw(
+    pop: dict, n: int, cfg: dict, *keys: int, seed: int | None = None
+) -> tuple[NDArray[np.int32], NDArray[np.float64], NDArray[np.float64]]:
+    """Separate crossing and common outcome-uniform streams.
+
+    Args:
+        pop (dict): The population.
+        n (int): The number of samples.
+        cfg (dict): The configuration.
+        keys (int): The keys.
+        seed (int | None, optional): The seed. Defaults to None.
+
+    Returns:
+        tuple[NDArray[np.int32], NDArray[np.float64], NDArray[np.float64]]: The cell, y, and y0.
+    """
     base = cfg["seed"] if seed is None else seed
     p = pop["p"]
     M = len(p)
@@ -50,11 +77,75 @@ def draw(pop, n, cfg, *keys, seed=None):
     return cell, (u < q[cell]).astype(float), (u < q0[cell]).astype(float)
 
 
-def diagnostics(bounds):
+def draw_continuous_outcome(
+    pop: dict, n: int, cfg: dict, *keys: int, phi: float = 10.0
+) -> dict[str, NDArray]:
+    """Beta outcomes with exact reference means and a common outcome uniform.
+
+    Among non-crossers, sample the terminal state from its conditional law;
+    their outcome distribution is a mixture of beta laws with state-specific
+    means. The observed and no-rescue outcomes coincide on those paths.
+    """
+    if phi <= 0 or not np.isfinite(phi):
+        raise ValueError("Beta precision must be positive and finite.")
+    M, base = len(pop["p"]), cfg["seed"]
+    cell = rng(base, *keys, 0).choice(M + 1, size=n, p=np.r_[pop["p"], pop["p0"]])
+    terminal_state = np.full(n, -1, dtype=np.int16)
+    noncrossing = cell == M
+    terminal_state[noncrossing] = rng(base, *keys, 2).choice(
+        pop["J"],
+        size=int(noncrossing.sum()),
+        p=pop["noncrossing_state_mass"] / pop["p0"],
+    )
+    q = np.empty(n)
+    q_no_rescue = np.empty(n)
+    q[~noncrossing] = pop["qR"][cell[~noncrossing]]
+    q_no_rescue[~noncrossing] = q[~noncrossing] + pop["tau"][cell[~noncrossing]]
+    q[noncrossing] = pop["noncrossing_outcome_mean"][terminal_state[noncrossing]]
+    q_no_rescue[noncrossing] = q[noncrossing]
+    u = rng(base, *keys, 1).random(n)
+    return {
+        "cell": cell.astype(np.int8),
+        "y": beta.ppf(u, phi * q, phi * (1 - q)),
+        "y_no_rescue": beta.ppf(u, phi * q_no_rescue, phi * (1 - q_no_rescue)),
+        "terminal_state": terminal_state,
+    }
+
+
+def diagnostics(bounds: tuple[float, float]) -> dict:
+    """Compute the diagnostics.
+
+    Args:
+        bounds (tuple[float, float]): The bounds.
+
+    Returns:
+        dict: The diagnostics.
+    """
     return m.bound_diagnostics(bounds)
 
 
-def record(rows, key, kind, method, interval, truth, pop, **extra):
+def record(
+    rows: list[dict],
+    key: dict,
+    kind: str,
+    method: str,
+    interval: list[float],
+    truth: dict,
+    pop: dict,
+    **extra: dict,
+) -> None:
+    """Record the result.
+
+    Args:
+        rows (list[dict]): The rows.
+        key (dict): The key.
+        kind (str): The kind.
+        method (str): The method.
+        interval (list[float]): The interval.
+        truth (dict): The truth.
+        pop (dict): The population.
+        extra (dict): The extra.
+    """
     m.append_result(
         rows,
         key,
@@ -70,8 +161,21 @@ def record(rows, key, kind, method, interval, truth, pop, **extra):
     )
 
 
-def moments(cell, y, ynr, key, M=5):
-    """Sufficient counts retain empirical moments and outcome coupling."""
+def moments(
+    cell: NDArray[np.int32], y: NDArray[np.float64], ynr: NDArray[np.float64], key: dict, M: int = 5
+) -> list[dict]:
+    """Sufficient counts retain empirical moments and outcome coupling.
+
+    Args:
+        cell (NDArray[np.int32]): The cell.
+        y (NDArray[np.float64]): The y.
+        ynr (NDArray[np.float64]): The ynr.
+        key (dict): The key.
+        M (int, optional): The number of states. Defaults to 5.
+
+    Returns:
+        list[dict]: The moments.
+    """
     atom = 4 * cell + 2 * y.astype(int) + ynr.astype(int)
     counts = np.bincount(atom, minlength=4 * (M + 1))
     return [
@@ -82,21 +186,29 @@ def moments(cell, y, ynr, key, M=5):
     ]
 
 
-def core_jobs(cfg):
+def core_jobs(cfg: dict) -> Generator:
+    """Generate the core jobs.
+
+    Args:
+        cfg (dict): The configuration.
+
+    Returns:
+        Generator: The core jobs.
+    """
     suites = cfg["suites"]
     R = cfg["finite_reps"]
 
-    def job(kind, rep, **kw):
+    def job(kind: str, rep: int, **kw: Any) -> dict:
         key = "_".join(f"{k}-{v}" for k, v in sorted(kw.items()))
-        return dict(
-            id=f"{kind}_{key}_rep-{rep}",
-            suite="core",
-            task=kind,
-            rep=rep,
-            weight=1,
-            config=cfg,
+        return {
+            "id": f"{kind}_{key}_rep-{rep}",
+            "suite": "core",
+            "task": kind,
+            "rep": rep,
+            "weight": 1,
+            "config": cfg,
             **kw,
-        )
+        }
 
     if "core" in suites:
         for rescue in (0.5, 0.75):
@@ -105,14 +217,15 @@ def core_jobs(cfg):
         for n in SAMPLE_SIZES:
             for rep in range(R):
                 yield job("sample_size", rep, n=n)
-        for rep in range(R):
-            yield job("states12", rep, n=1000)
         for n in CAP_SIZES:
             for rep in range(R):
                 yield job("active_caps", rep, n=n)
         for rep in range(R):
             yield job("external", rep, n=1000)
-            yield job("radius", rep, n=2500)
+    if "continuous_outcome" in suites:
+        for n in (250, 1000, 10000):
+            for rep in range(cfg.get("continuous_outcome_reps", R)):
+                yield job("continuous_outcome", rep, n=n)
     if "gamma" in suites:
         for n in (50, 1000, 10000):
             for rep in range(R):
@@ -126,7 +239,12 @@ def core_jobs(cfg):
                 yield j
 
 
-def primary_job(job):
+def primary_job(job: dict) -> None:
+    """Run the primary job.
+
+    Args:
+        job (dict): The job.
+    """
     cfg, rep, rescue = job["config"], job["rep"], job["rescue"]
     raw, counts, contrasts, pair = [], [], [], {}
     for arm in (0, 1):
@@ -271,7 +389,15 @@ def primary_job(job):
     }
 
 
-def finite_job(job):
+def finite_job(job: dict) -> dict:
+    """Run the finite job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The finite job.
+    """
     cfg, rep, n, task = job["config"], job["rep"], job["n"], job["task"]
     rescue = 0.75 if task == "states12" else 0.5
     pop = population(rescue, states=12 if task == "states12" else 4, caps=task == "active_caps")
@@ -325,7 +451,15 @@ def finite_job(job):
     }
 
 
-def external_job(job):
+def external_job(job: dict) -> dict:
+    """Run the external job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The external job.
+    """
     cfg, rep = job["config"], job["rep"]
     pop = population()
     H = m.calibration_matrix(5)
@@ -395,7 +529,15 @@ def external_job(job):
     }
 
 
-def radius_job(job):
+def radius_job(job: dict) -> dict:
+    """Run the radius job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The radius job.
+    """
     cfg, rep, n = job["config"], job["rep"], job["n"]
     pop, rows = population(), []
     gt = float(np.sqrt(pop["p"] @ (pop["tau"] ** 2)))
@@ -445,7 +587,15 @@ def radius_job(job):
     }
 
 
-def rare_job(job):
+def rare_job(job: dict) -> dict:
+    """Run the rare job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The rare job.
+    """
     cfg, n, rows = job["config"], 1000, []
     expected, ei = job["expected"], job["ei"]
     p = expected / n
@@ -487,7 +637,56 @@ def rare_job(job):
     return {"core/rare_replications.csv": rows}
 
 
-def run_core_job(job):
+def continuous_outcome_job(job: dict) -> dict:
+    """Paired bounded-outcome comparison with the binary reference sharp set."""
+    cfg, n, rep = job["config"], job["n"], job["rep"]
+    pop, phi, rows = population(), 10.0, []
+    sample = draw_continuous_outcome(pop, n, cfg, 90, n, rep, phi=phi)
+    cell, y = sample["cell"], sample["y"]
+    F = m.features(cell, y, 5)
+    mean = F.mean(0)
+    truth = m.exact_population(pop, "budget")
+    lower, upper = m.signed_budget_exact(mean[0], mean[1:6], mean[6:])
+    plugin_lower, plugin_upper = float(lower), float(upper[0])
+    extra = {
+        "plugin_lower": plugin_lower,
+        "plugin_upper": plugin_upper,
+        "plugin_error": max(abs(plugin_lower - truth[0]), abs(plugin_upper - truth[1])),
+        "plugin_failure": 0,
+    }
+    key = {
+        "design": "continuous_outcome", "rescue": 0.5, "arm": 0,
+        "n": n, "rep": rep, "phi": phi, "sample_id": job["id"],
+    }
+    for method in ("hybrid_eb_cp", "hybrid_hoeffding_cp", "wald"):
+        mean, lo, hi, al, au = m.cell_region(F, method)
+        rr = m.region(
+            mean, lo, hi, 5, gamma=0.2, aggregate_lo=al, aggregate_hi=au,
+            mesh=cfg["mesh"], refine=False,
+        )
+        record(
+            rows, key, "budget", method, [z.value for z in rr], truth, pop,
+            **extra, **diagnostics(rr),
+        )
+    interval = m.bootstrap_budget(
+        cell, y, 5, rng(cfg["bootstrap_seed"], 91, n, rep), cfg["bootstrap_resamples"],
+    )
+    record(rows, key, "budget", "bootstrap", interval, truth, pop, **extra)
+    return {
+        "continuous_outcome/continuous_outcome_replications.csv": rows,
+        "_samples": sample,
+    }
+
+
+def run_core_job(job: dict) -> dict:
+    """Run the core job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict: The core job.
+    """
     m.DEFAULT_MESH = job["config"]["mesh"]
     task = job["task"]
     if task == "primary":
@@ -500,11 +699,20 @@ def run_core_job(job):
         return radius_job(job)
     if task == "rare":
         return rare_job(job)
+    if task == "continuous_outcome":
+        return continuous_outcome_job(job)
     raise ValueError(f"Unknown core task: {task}")
 
 
-def deterministic_audits(cfg):
-    """Population truth, structural equivalence, and fixed-mesh diagnostics."""
+def deterministic_audits(cfg: dict) -> dict:
+    """Population truth, structural equivalence, and fixed-mesh diagnostics.
+
+    Args:
+        cfg (dict): The configuration.
+
+    Returns:
+        dict: The deterministic audits.
+    """
     m.DEFAULT_MESH = cfg["mesh"]
     files = {
         "core/geometry.csv": m.geometry_audit(),
@@ -561,7 +769,6 @@ def deterministic_audits(cfg):
                 )
     for design, pop, kind, res in (
         ("sample_size", population(), "calibrated", 0.5),
-        ("states12", population(0.75, states=12), "budget", 0.75),
         ("active_caps", population(caps=True), "budget", 0.5),
     ):
         L, U = m.exact_population(pop, kind)

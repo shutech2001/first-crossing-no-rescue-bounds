@@ -10,6 +10,7 @@ import multiprocessing
 import os
 import shutil
 import tempfile
+import zipfile
 from collections.abc import Callable, Generator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import scipy
 from threadpoolctl import threadpool_limits  # type: ignore
 from tqdm import tqdm
 
@@ -28,17 +30,21 @@ from extensions import (
 )
 from report_experiments import generate_reports
 from simulations import core_jobs, deterministic_audits, run_core_job
+from joint_benchmark import joint_jobs, joint_protocol, run_joint_job
 
 SRC_DIR = Path(__file__).resolve().parent
 ROOT = SRC_DIR.parent
-SUITES = ("core", "rare", "continuous", "observational", "partitions", "gamma")
+SUITES = ("core", "rare", "continuous", "continuous_outcome", "observational", "partitions", "gamma", "joint")
+DATA_ARCHIVE = "simulation_data.zip"
 COMPUTATION_FILES = (
     "experiments.py",
     "simulations.py",
     "methods.py",
     "extensions.py",
+    "joint_benchmark.py",
+    "joint_regions.py",
 )
-RESULT_DIRECTORIES = ("core", "gamma", "continuous", "observational", "partitions")
+RESULT_DIRECTORIES = ("core", "gamma", "continuous", "continuous_outcome", "observational", "partitions", "joint")
 _THREAD_LIMITS: threadpool_limits | None = None
 
 
@@ -72,11 +78,13 @@ def has_saved_results(out: Path) -> bool:
     Returns:
         bool: True if there are any saved results, False otherwise.
     """
-    return any(any((out / name).glob("*.csv")) for name in RESULT_DIRECTORIES)
+    return (out / DATA_ARCHIVE).is_file() or any(
+        any((out / name).glob("*.csv")) for name in RESULT_DIRECTORIES
+    )
 
 
 def prepare_checkpoints(out: Path, cfg: dict) -> None:
-    """Keep resume identity only until the numerical results are saved.
+    """Protect resume identity; retain the completed configuration in the archive.
 
     Args:
         out (Path): The output directory.
@@ -87,10 +95,8 @@ def prepare_checkpoints(out: Path, cfg: dict) -> None:
     """
     checkpoints = out / "checkpoints"
     control = checkpoints / "run.json"
-    sources = {
-        name: hashlib.sha256((SRC_DIR / name).read_bytes()).hexdigest()
-        for name in COMPUTATION_FILES
-    }
+    source_bytes = {name: (SRC_DIR / name).read_bytes() for name in COMPUTATION_FILES}
+    sources = {name: hashlib.sha256(value).hexdigest() for name, value in source_bytes.items()}
     signature = stable_hash({"config": cfg, "sources": sources})
     if control.exists():
         saved = json.loads(control.read_text())
@@ -105,7 +111,33 @@ def prepare_checkpoints(out: Path, cfg: dict) -> None:
                 "Existing results found. Use --report-only to regenerate figures and "
                 "tables, or a new --out directory for another simulation run."
             )
-        atomic_json(control, {"config": cfg, "signature": signature})
+        atomic_json(control, {
+            "config": cfg, "signature": signature, "sources": sources,
+            "full_protocol": full_protocol(cfg),
+            "numpy_version": np.__version__, "scipy_version": scipy.__version__,
+            "joint_protocol": joint_protocol(cfg) if "joint" in cfg["suites"] else None,
+        })
+    # Capture the executed source before any simulations. A later edit while a
+    # long run is active must not replace this source in the completed archive.
+    snapshots = checkpoints / "source"
+    snapshots.mkdir(exist_ok=True)
+    for name, value in source_bytes.items():
+        target = snapshots / name
+        if target.exists():
+            if hashlib.sha256(target.read_bytes()).hexdigest() != sources[name]:
+                raise SystemExit(f"Saved source snapshot is inconsistent: {target}")
+        else:
+            target.write_bytes(value)
+    for name in ("report_experiments.py",):
+        source = SRC_DIR / name
+        target = snapshots / name
+        if source.exists() and not target.exists():
+            target.write_bytes(source.read_bytes())
+    for name in ("pyproject.toml", "poetry.lock", "README.md"):
+        source = ROOT / name
+        target = snapshots / name
+        if source.exists() and not target.exists():
+            target.write_bytes(source.read_bytes())
 
 
 class StudyProgress(tqdm):
@@ -222,6 +254,21 @@ def checkpoint_path(out: Path, job: dict) -> Path:
     return out / "checkpoints" / (identifier + ".json.gz")
 
 
+def save_checkpoint(out: Path, job: dict, result: dict) -> None:
+    """Save patient arrays before marking a job complete, including on resumption."""
+    path = checkpoint_path(out, job)
+    samples = result.pop("samples", None)
+    if samples:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sample_path = path.parent / (job["id"] + ".npz")
+        temporary = sample_path.with_suffix(".npz.tmp")
+        with temporary.open("wb") as stream:
+            np.savez_compressed(stream, **samples)
+        os.replace(temporary, sample_path)
+        result["sample_file"] = "samples/" + sample_path.name
+    atomic_json(path, result, compressed=True)
+
+
 def worker_setup() -> None:
     """Set up the worker environment.
 
@@ -246,6 +293,8 @@ def execute_job(job: dict) -> dict:
         context, files = {}, deterministic_audits(job["config"])
     elif job.get("stage") == "preparation":
         context, files = run_preparation_job(job)
+    elif job.get("task") == "joint":
+        context, files = {}, run_joint_job(job)
     elif job.get("task") in (
         "primary",
         "sample_size",
@@ -255,10 +304,12 @@ def execute_job(job: dict) -> dict:
         "radius",
         "gamma",
         "rare",
+        "continuous_outcome",
     ):
         context, files = {}, run_core_job(job)
     else:
         context, files = {}, run_extension_job(job)
+    samples = files.pop("_samples", None)
     return {
         "id": job["id"],
         "weight": job.get("weight", 1),
@@ -268,6 +319,7 @@ def execute_job(job: dict) -> dict:
         },
         "context": context,
         "files": files,
+        "samples": samples,
     }
 
 
@@ -294,6 +346,9 @@ def run_jobs(
             result = read_checkpoint(path)
             if result["id"] != job["id"]:
                 raise RuntimeError(f"Checkpoint identity mismatch: {path}")
+            sample_file = result.get("sample_file")
+            if sample_file and not (path.parent / Path(sample_file).name).is_file():
+                raise RuntimeError(f"Checkpoint sample data are missing: {sample_file}")
             progress.update(job.get("weight", 1))
             if on_complete:
                 on_complete(result)
@@ -305,7 +360,7 @@ def run_jobs(
         worker_setup()
         for job in pending:
             result = execute_job(job)
-            atomic_json(checkpoint_path(out, job), result, compressed=True)
+            save_checkpoint(out, job, result)
             progress.update(job.get("weight", 1))
             progress.set_postfix_str(
                 job.get("suite", job.get("task", "preparation")), refresh=False
@@ -336,7 +391,7 @@ def run_jobs(
             future = next(as_completed(futures))
             job = futures.pop(future)
             result = future.result()
-            atomic_json(checkpoint_path(out, job), result, compressed=True)
+            save_checkpoint(out, job, result)
             progress.update(job.get("weight", 1))
             progress.set_postfix_str(
                 job.get("suite", job.get("task", "preparation")), refresh=False
@@ -370,7 +425,7 @@ def csv_value(value: Any) -> str:
 
 
 def materialize(out: Path) -> dict[str, int]:
-    """Stream checkpoints into reproducible CSVs without loading the full study.
+    """Package replication CSVs, original samples and references into one archive.
 
     Args:
         out (Path): The output directory.
@@ -411,9 +466,36 @@ def materialize(out: Path) -> dict[str, int]:
                     row_counts[name] += 1
         for f in handles.values():
             f.close()
-        for name in schemas:
-            (out / name).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary / name, out / name)
+        archive_path = temporary / DATA_ARCHIVE
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=6, allowZip64=True) as archive:
+            for name in schemas:
+                archive.write(temporary / name, name)
+            control = out / "checkpoints" / "run.json"
+            if control.exists():
+                archive.write(control, "run.json")
+            snapshots = out / "checkpoints" / "source"
+            if snapshots.exists():
+                for source in sorted(snapshots.iterdir()):
+                    if source.is_file():
+                        archive.write(source, "source/" + source.name)
+            records = []
+            for path in paths:
+                result = read_checkpoint(path)
+                records.append({k: v for k, v in result.items()
+                                if k not in ("files", "context", "samples")})
+                if result.get("context"):
+                    archive.writestr("references/" + result["id"] + ".json",
+                                     json.dumps(result["context"], default=json_default))
+                if result.get("sample_file"):
+                    archive.write(path.parent / Path(result["sample_file"]).name,
+                                  result["sample_file"], compress_type=zipfile.ZIP_STORED)
+            archive.writestr("jobs.json", json.dumps(records, default=json_default))
+        with zipfile.ZipFile(archive_path) as archive:
+            damaged = archive.testzip()
+            if damaged is not None:
+                raise OSError(f"Archive verification failed: {damaged}")
+        os.replace(archive_path, out / DATA_ARCHIVE)
     finally:
         for f in handles.values():
             f.close()
@@ -430,12 +512,16 @@ def full_protocol(cfg: dict) -> bool:
     Returns:
         bool: True if the configuration is a full protocol, False otherwise.
     """
+    if set(cfg["suites"]) == {"joint"}:
+        return cfg["joint_reps"] >= 500
     return (
         set(cfg["suites"]) == set(SUITES)
+        and cfg["joint_reps"] >= 500
         and cfg["finite_reps"] >= 500
         and cfg["rare_reps"] >= 20000
         and cfg["observational_reps"] >= 250
         and cfg["continuous_reps"] >= 250
+        and cfg["continuous_outcome_reps"] >= 500
         and cfg["partition_reps"] >= 250
         and cfg["oracle_n"] >= 2000000
         and cfg["calibration_n"] >= 100000
@@ -460,7 +546,9 @@ def make_config(args: argparse.Namespace) -> dict:
         "rare_reps": 20000,
         "observational_reps": 250,
         "continuous_reps": 250,
+        "continuous_outcome_reps": 500,
         "partition_reps": 250,
+        "joint_reps": 500,
         "bootstrap_resamples": 999,
         "forest_trees": 200,
         "oracle_n": 2000000,
@@ -480,7 +568,9 @@ def make_config(args: argparse.Namespace) -> dict:
             rare_reps=20,
             observational_reps=2,
             continuous_reps=2,
+            continuous_outcome_reps=2,
             partition_reps=2,
+            joint_reps=2,
             bootstrap_resamples=19,
             forest_trees=8,
             oracle_n=20000,
@@ -492,7 +582,9 @@ def make_config(args: argparse.Namespace) -> dict:
         "rare_reps",
         "observational_reps",
         "continuous_reps",
+        "continuous_outcome_reps",
         "partition_reps",
+        "joint_reps",
         "bootstrap_resamples",
         "forest_trees",
         "oracle_n",
@@ -502,7 +594,8 @@ def make_config(args: argparse.Namespace) -> dict:
         if value is not None:
             cfg[name] = value
     if args.reps is not None:
-        for name in ("finite_reps", "observational_reps", "continuous_reps", "partition_reps"):
+        for name in ("finite_reps", "observational_reps", "continuous_reps", "partition_reps",
+                     "joint_reps", "continuous_outcome_reps"):
             if getattr(args, name, None) is None:
                 cfg[name] = args.reps
     cfg["suites"] = list(dict.fromkeys(cfg["suites"]))
@@ -538,7 +631,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "rare-reps",
         "observational-reps",
         "continuous-reps",
+        "continuous-outcome-reps",
         "partition-reps",
+        "joint-reps",
         "bootstrap-resamples",
         "forest-trees",
         "oracle-n",
@@ -548,7 +643,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--report-only",
         action="store_true",
-        help="Rebuild figures, tables, and summaries from saved CSVs; never simulate.",
+        help="Rebuild manuscript figures and tables from saved results; never simulate.",
     )
     p.add_argument(
         "--no-report",
@@ -572,7 +667,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "rare_reps",
         "observational_reps",
         "continuous_reps",
+        "continuous_outcome_reps",
         "partition_reps",
+        "joint_reps",
         "bootstrap_resamples",
         "forest_trees",
         "oracle_n",
@@ -595,15 +692,17 @@ def main(argv: list[str] | None = None) -> None:
     out = args.out
     if args.report_only:
         if not out.is_dir() or not has_saved_results(out):
-            raise SystemExit(f"No saved numerical CSVs found: {out}")
+            raise SystemExit(f"No saved simulation archive or legacy CSVs found: {out}")
         with output_lock(out):
-            if (out / "checkpoints").exists():
+            if (out / "checkpoints").exists() and not (out / DATA_ARCHIVE).is_file():
                 raise SystemExit(
                     "An incomplete simulation run has checkpoints. "
                     "Resume that run before regenerating reports."
                 )
+            # Atomic publication of the verified ZIP marks completion. Leftover
+            # checkpoints from interrupted cleanup do not require simulation.
             generate_reports(out)
-        print(f"Regenerated figures and TeX tables from saved results: {out}")
+        print(f"Regenerated manuscript figures and tables: {out}")
         return
     cfg = make_config(args)
     prep = list(preparation_jobs(cfg))
@@ -618,11 +717,14 @@ def main(argv: list[str] | None = None) -> None:
         "config": cfg,
     }
     core = list(core_jobs(cfg))
+    joint = list(joint_jobs(cfg))
+    audits = [audit] if "core" in cfg["suites"] or "gamma" in cfg["suites"] else []
     # Extension job count is known before references are calculated.
     extension_total = 8 * cfg["observational_reps"] if "observational" in cfg["suites"] else 0
     extension_total += 4 * cfg["continuous_reps"] if "continuous" in cfg["suites"] else 0
     extension_total += 3 * cfg["partition_reps"] if "partitions" in cfg["suites"] else 0
-    total = 1 + len(prep) + sum(j.get("weight", 1) for j in core) + extension_total
+    total = len(audits) + len(prep) + sum(j.get("weight", 1) for j in core) + extension_total
+    total += len(joint)
     if args.dry_run:
         print(
             json.dumps(
@@ -652,7 +754,7 @@ def main(argv: list[str] | None = None) -> None:
             mininterval=0.5,
             dynamic_ncols=True,
         ) as progress:
-            run_jobs([audit, *prep], out, args.workers, progress, accept)
+            run_jobs([*audits, *prep], out, args.workers, progress, accept)
             ext = list(extension_jobs(cfg, context))
             for i, job in enumerate(ext):
                 job.setdefault("id", f"extension_{i}")
@@ -661,18 +763,22 @@ def main(argv: list[str] | None = None) -> None:
                 raise RuntimeError(
                     f"Extension job count {len(ext)} differs from planned {extension_total}"
                 )
-            run_jobs([*core, *ext], out, args.workers, progress)
+            run_jobs([*core, *ext, *joint], out, args.workers, progress)
             if progress.n != total:
                 raise RuntimeError(f"Incomplete progress: {progress.n}/{total}")
-        print("Saving replication CSVs...", flush=True)
+        print("Saving simulation_data.zip (replications, samples, references and run settings)...", flush=True)
         materialize(out)
-        # At this point every numerical result is in CSV; reporting no longer
-        # depends on checkpoints, including when rendering fails or is deferred.
+        # The verified archive contains all results and samples. Reporting no
+        # longer depends on checkpoints, including when rendering is deferred.
         shutil.rmtree(out / "checkpoints")
         if not args.no_report:
-            print("Generating PDF figures and TeX tables from saved results...", flush=True)
+            print("Generating manuscript figures and tables...", flush=True)
             generate_reports(out)
-        print(f"{'Full study' if full_protocol(cfg) else 'Selected execution check'} saved: {out}")
+        if full_protocol(cfg):
+            label = "Full joint benchmark" if set(cfg["suites"]) == {"joint"} else "Full study"
+        else:
+            label = "Selected execution check"
+        print(f"{label} saved: {out}")
 
 
 if __name__ == "__main__":

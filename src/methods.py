@@ -107,6 +107,8 @@ def finite_population(
             "arm": a,
             "rescue": float(p.sum()),
             "p0": float(mass.sum()),
+            "noncrossing_state_mass": mass.copy(),
+            "noncrossing_outcome_mean": r.copy(),
         }
 
     if alpha is None:
@@ -540,6 +542,12 @@ def bound_diagnostics(rr):
 
     return dict(
         failure=int(any(z.status != "ok" for z in rr)),
+        empty_program=int(any(z.status in {"lp_failure_2", "empty_box", "empty_inner_budget"} for z in rr)),
+        unavailable_certificate=int(any(z.status.startswith("certificate_") for z in rr)),
+        stopping_limit=int(any(
+            z.refinement_count == 2 and z.inner_status in {"gap_above_tolerance", "residual_failed"}
+            for z in rr
+        )),
         runtime=sum(z.runtime for z in rr),
         dual_gap=finite_max(z.dual_gap for z in rr),
         lower_status=rr[0].status,
@@ -832,7 +840,16 @@ def cell_region(F, method, alpha=0.05, extra_D=0):
     M = (F.shape[1] - 1) // 2
     ag = np.column_stack([F[:, 1: 1 + M].sum(1), F[:, 0] - F[:, 1 + M:].sum(1)])  # fmt: skip
     allf = np.column_stack([F, ag])
-    m, l, u = primitive_box(allf, method, alpha, allf.shape[1] + extra_D)
+    D = allf.shape[1] + extra_D
+    if method in {"hybrid_eb_cp", "hybrid_hoeffding_cp"}:
+        # All 2M+3 coordinates receive the same alpha/D allocation. Only
+        # crossing indicators are Bernoulli when outcomes have bounded support.
+        outcome_method = "eb" if method == "hybrid_eb_cp" else "hoeffding"
+        m, l, u = primitive_box(allf, outcome_method, alpha, D)
+        probability = np.r_[np.arange(1, 1 + M), allf.shape[1] - 2]
+        l[probability], u[probability] = cp_counts(allf[:, probability].sum(0), len(F), alpha, D)
+    else:
+        m, l, u = primitive_box(allf, method, alpha, D)
     return m[:-2], l[:-2], u[:-2], l[-2:], u[-2:]
 
 
@@ -1047,23 +1064,52 @@ def endpoint_cp(cell, y, M, kind, alpha=0.05):
     raise ValueError(kind)
 
 
-def bootstrap_budget(cell, y, M, rng, B=499, alpha=0.05):
+def bootstrap_budget(cell, y, M, rng, B=999, alpha=0.05):
     """Joint basic endpoint bootstrap; regular-law comparator, not finite-sample.
 
-    Multinomial sufficient-count resampling equals subject resampling here.
+    Binary outcomes use equivalent multinomial sufficient-count resampling.
+    Other bounded outcomes resample patient-level (cell, Y) pairs directly.
     Exact capped functional is bootstrapped, not an LP tangent approximation.
     """
+    cell, y = np.asarray(cell), np.asarray(y, dtype=float)
     n = len(y)
-    code = 2 * cell + y.astype(int)
-    ph = np.bincount(code, minlength=2 * (M + 1)) / n
-    draws = rng.multinomial(n, ph, size=B) / n
-    pp = draws[:, : 2 * M].reshape(B, M, 2).sum(2)
-    bb = draws[:, 1: 2 * M: 2]  # fmt: skip
-    mm = draws[:, 1::2].sum(1)
+    if (
+        n < 1 or cell.shape != y.shape or y.ndim != 1 or B < 1
+        or not np.all(np.isfinite(y)) or np.any((y < 0) | (y > 1))
+        or np.any((cell < 0) | (cell > M) | (cell != np.floor(cell)))
+    ):
+        raise ValueError("Bootstrap requires bounded patient outcomes and valid crossing cells.")
+    cell = cell.astype(int, copy=False)
+    if np.all((y == 0) | (y == 1)):
+        code = 2 * cell + y.astype(int)
+        ph = np.bincount(code, minlength=2 * (M + 1)) / n
+        draws = rng.multinomial(n, ph, size=B) / n
+        pp = draws[:, : 2 * M].reshape(B, M, 2).sum(2)
+        bb = draws[:, 1: 2 * M: 2]  # fmt: skip
+        mm = draws[:, 1::2].sum(1)
+        p = ph[: 2 * M].reshape(M, 2).sum(1)
+        b = ph[1: 2 * M: 2]  # fmt: skip
+        mu = ph[1::2].sum()
+    else:
+        pp, bb, mm = np.empty((B, M)), np.empty((B, M)), np.empty(B)
+        # Bound peak memory independently of B and avoid a B x n x M tensor.
+        batch = max(1, 262144 // n)
+        for start in range(0, B, batch):
+            size = min(batch, B - start)
+            indices = rng.integers(n, size=(size, n))
+            sampled_y = y[indices]
+            codes = cell[indices] + (M + 1) * np.arange(size)[:, None]
+            counts = np.bincount(codes.ravel(), minlength=size * (M + 1)).reshape(size, M + 1)
+            sums = np.bincount(
+                codes.ravel(), weights=sampled_y.ravel(), minlength=size * (M + 1)
+            ).reshape(size, M + 1)
+            pp[start: start + size] = counts[:, :M] / n
+            bb[start: start + size] = sums[:, :M] / n
+            mm[start: start + size] = sampled_y.mean(1)
+        p = np.bincount(cell, minlength=M + 1)[:M] / n
+        b = np.bincount(cell, weights=y, minlength=M + 1)[:M] / n
+        mu = y.mean()
     Ls, Us = signed_budget_exact(mm, pp, bb)
-    p = ph[: 2 * M].reshape(M, 2).sum(1)
-    b = ph[1: 2 * M: 2]  # fmt: skip
-    mu = ph[1::2].sum()
     L, U = signed_budget_exact(mu, p, b)
     L = float(L)
     U = float(U[0])

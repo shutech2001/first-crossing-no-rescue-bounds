@@ -6,7 +6,7 @@ import math
 from collections.abc import Iterable
 
 import numpy as np
-from scipy.special import expit, ndtr, ndtri
+from scipy.special import expit
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier  # type: ignore
 from sklearn.model_selection import StratifiedKFold  # type: ignore
@@ -131,7 +131,7 @@ def extension_jobs(config, context) -> Iterable[dict]:
                 }
 
 
-def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6, supported=False):
+def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6):
     """No-rescue path probabilities, using the paper's correlated innovations.
 
     The maximum centered biomarker permits one common-random-number threshold
@@ -149,17 +149,7 @@ def continuous_paths(n, rng, K=5, d=5, rho=0.35, c0=0.6, supported=False):
     for k in range(K):
         mb = 0.45 * np.tanh(B) + 0.25 * np.tanh(S) + 0.10 * np.tanh(W[:, 1])
         threshold = c0 + 0.05 * (k + 1) / K
-        if supported:
-            truncation_probability = ndtr((threshold - mb) / 0.6)
-            eb = ndtri(
-                np.clip(
-                    rng.random(n) * truncation_probability,
-                    np.finfo(float).tiny,
-                    np.nextafter(1.0, 0.0),
-                )
-            )
-        else:
-            eb = rng.normal(size=n)
+        eb = rng.normal(size=n)
         es = rho * eb + np.sqrt(1 - rho**2) * rng.normal(size=n)
         S = 0.55 * S + 0.15 * W[:, 0] + 0.10 * np.sin(S) + 0.60 * es
         B = mb + 0.60 * eb
@@ -292,7 +282,10 @@ def _suite_files(files):
         "continuous": "continuous",
         "partition": "partitions",
     }
-    return {f"{directories[name.split('_', 1)[0]]}/{name}": rows for name, rows in files.items()}
+    return {
+        name if name == "_samples" else f"{directories[name.split('_', 1)[0]]}/{name}": rows
+        for name, rows in files.items()
+    }
 
 
 def run_preparation_job(job):
@@ -357,10 +350,6 @@ def _run_preparation_job(job):
         for bi, n in enumerate(sizes):
             dat = continuous_paths(n, _rng(master, 2, 2, ci, bi), K, d, rho, c0)
             batch = _moments(_continuous_cells(dat, K), dat["qR"], dat["q0"], 4 * K)
-            supported = continuous_paths(
-                n, _rng(master, 3, 2, ci, bi), K, d, rho, c0, supported=True
-            )
-            psi = float(np.mean(supported["q0"]))
             _accumulate(total, batch, n / sum(sizes))
             records.append(
                 dict(
@@ -370,19 +359,12 @@ def _run_preparation_job(job):
                     rho=rho,
                     batch=bi,
                     n=n,
-                    psi=psi,
-                    supported_gap=psi - batch["theta"],
                     oracle_seed=master,
                     path_stream=json.dumps([2, 2, ci, bi]),
-                    supported_stream=json.dumps([3, 2, ci, bi]),
                     **_population_record(batch),
                 )
             )
         total = _finish_reference(total, records, c0=c0, K=K, d=d, rho=rho, **calibration)
-        total["psi"] = float(np.average([r["psi"] for r in records], weights=sizes))
-        total["psi_mcse"] = _batch_se(records, "psi")
-        total["supported_gap"] = total["psi"] - total["theta"]
-        total["supported_gap_mcse"] = _batch_se(records, "supported_gap")
         row = {k: v for k, v in total.items() if np.isscalar(v)}
         row.update(ci=ci, **_population_record(total))
         return {f"continuous_{ci}": total}, {
@@ -582,23 +564,23 @@ def _continuous_job(job):
         "n": n,
         "rep": rep,
         "seed": master,
+        "sample_id": job["id"],
         "rng_stream": json.dumps([2, ci, n, rep]),
     }
-    rows, moments = [], []
-    for method in ("cp", "kl", "eb", "wald"):
-        try:
-            row, mr = _unweighted_analysis(cell, y, 4 * K, pop, method, key, config, True)
-            moments.extend(mr)
-        except Exception as exc:
-            row, mr = _physical_fallback(key, method, pop, exc)
-            moments.extend(mr)
-        rows.append(row)
+    try:
+        row, moments = _unweighted_analysis(cell, y, 4 * K, pop, "cp", key, config, True)
+    except Exception as exc:
+        row, moments = _physical_fallback(key, "cp", pop, exc)
     return {
-        "continuous_replications.csv": rows,
+        "continuous_replications.csv": [row],
         "continuous_moments.csv": moments,
-        "continuous_paired_contrasts.csv": _paired_methods(
-            rows, ["ci", "K", "d", "rho", "n", "rep"]
-        ),
+        "_samples": {
+            **dat,
+            "uniform": uniform,
+            "cell": cell,
+            "y": y,
+            "ynr": (uniform < dat["q0"]).astype(float),
+        },
     }
 
 
@@ -621,6 +603,7 @@ def _partition_job(job):
                 "cap": cap,
                 "M": M,
                 "seed": master,
+                "sample_id": job["id"],
                 "rng_stream": json.dumps([3, n, rep]),
             }
             try:
@@ -657,6 +640,7 @@ def _partition_job(job):
         "partition_replications.csv": rows,
         "partition_moments.csv": moments,
         "partition_paired_contrasts.csv": contrasts,
+        "_samples": {**dat, "uniform": uniform},
     }
 
 
@@ -685,6 +669,9 @@ def _draw_observational(pop, n, scenario, path_rng, outcome_rng):
         "A": A,
         "e": e,
         "cell": cell,
+        "qR": qr,
+        "q0": qnr,
+        "uniform": uniform,
         "y": (uniform < qr).astype(float),
         "ynr": (uniform < qnr).astype(float),
     }
@@ -802,6 +789,7 @@ def _observational_job(job):
         "n": n,
         "rep": rep,
         "seed": master,
+        "sample_id": job["id"],
         "rng_stream": json.dumps([1, si, n, rep]),
     }
     fits, errors, diagnostics = {}, {}, []
@@ -894,6 +882,13 @@ def _observational_job(job):
         "observational_moments.csv": moments,
         "observational_nuisance_fits.csv": diagnostics,
         "observational_paired_contrasts.csv": _paired_methods(rows, ["scenario", "n", "rep"]),
+        "_samples": {
+            **dat,
+            **{
+                "fitted_propensity_" + name: fits[name][0] if name in fits else np.full(n, np.nan)
+                for name in ("logit", "main", "rf")
+            },
+        },
     }
 
 
