@@ -5,6 +5,7 @@ from collections.abc import Generator
 from dataclasses import fields
 
 import numpy as np
+from numpy.typing import NDArray
 
 import methods as m
 from joint_regions import joint_region
@@ -24,8 +25,15 @@ MAX_ITERATIONS = 120
 GAP_TOLERANCE = 1e-4
 
 
-def population_atoms(pop: dict) -> np.ndarray:
-    """Return the ordered (crossing cell, outcome) law, noncrossing last."""
+def population_atoms(pop: dict) -> NDArray[np.float64]:
+    """Return the ordered (crossing cell, outcome) law, noncrossing last.
+
+    Args:
+        pop (dict): The population.
+
+    Returns:
+        NDArray[np.float64]: The ordered (crossing cell, outcome) law, noncrossing last.
+    """
     atoms = np.column_stack((pop["p"] - pop["b"], pop["b"]))
     atoms = np.vstack((atoms, (1 - pop["p"].sum() - pop["b0"], pop["b0"])))
     if atoms.shape != (6, 2) or np.any(atoms < 0) or not np.isclose(atoms.sum(), 1):
@@ -33,8 +41,19 @@ def population_atoms(pop: dict) -> np.ndarray:
     return atoms
 
 
-def draw_halves(pop: dict, n: int, seed: int, setting_index: int, rep: int) -> np.ndarray:
-    """Independent half streams are invariant to worker count and job order."""
+def draw_halves(pop: dict, n: int, seed: int, setting_index: int, rep: int) -> NDArray[np.float64]:
+    """Independent half streams are invariant to worker count and job order.
+
+    Args:
+        pop (dict): The population.
+        n (int): The number of observations.
+        seed (int): The seed.
+        setting_index (int): The setting index.
+        rep (int): The replication.
+
+    Returns:
+        NDArray[np.float64]: The independent half streams.
+    """
     probabilities = population_atoms(pop).ravel()
     return np.stack(
         [
@@ -46,7 +65,15 @@ def draw_halves(pop: dict, n: int, seed: int, setting_index: int, rep: int) -> n
     )
 
 
-def joint_jobs(cfg: dict) -> Generator[dict, None, None]:
+def joint_jobs(cfg: dict) -> Generator:
+    """Generate the joint jobs.
+
+    Args:
+        cfg (dict): The configuration.
+
+    Returns:
+        Generator: The joint jobs.
+    """
     if "joint" not in cfg["suites"]:
         return
     for setting_index, (setting, n, caps) in enumerate(JOINT_SETTINGS):
@@ -66,7 +93,14 @@ def joint_jobs(cfg: dict) -> Generator[dict, None, None]:
 
 
 def joint_protocol(cfg: dict) -> dict:
-    """Permanent protocol and population metadata, independent of checkpoints."""
+    """Permanent protocol and population metadata, independent of checkpoints.
+
+    Args:
+        cfg (dict): The configuration.
+
+    Returns:
+        dict: The joint protocol.
+    """
     settings = []
     for index, (setting, n, caps) in enumerate(JOINT_SETTINGS):
         pop = population(rescue=0.5, arm=0, states=4, caps=caps)
@@ -127,7 +161,14 @@ def joint_protocol(cfg: dict) -> dict:
 
 
 def endpoint_diagnostics(bounds: tuple[m.Bound, m.Bound]) -> dict:
-    """Retain every scalar endpoint diagnostic, including exhaustion flags."""
+    """Retain every scalar endpoint diagnostic, including exhaustion flags.
+
+    Args:
+        bounds (tuple[m.Bound, m.Bound]): The bounds.
+
+    Returns:
+        dict: The endpoint diagnostics.
+    """
     extra = m.bound_diagnostics(bounds)
     for prefix, bound in zip(("lower", "upper"), bounds):
         for field in fields(bound):
@@ -149,6 +190,14 @@ def endpoint_diagnostics(bounds: tuple[m.Bound, m.Bound]) -> dict:
 
 
 def run_joint_job(job: dict) -> dict[str, list[dict]]:
+    """Run a joint job.
+
+    Args:
+        job (dict): The job.
+
+    Returns:
+        dict[str, list[dict]]: The joint job.
+    """
     cfg, n, rep = job["config"], job["n"], job["rep"]
     pop = population(rescue=0.5, arm=0, states=4, caps=job["caps"])
     truth = m.exact_population(pop, "budget")
