@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reproducible study datasets, checkpoints, and generated reports
+results/
+
+# .DS_Store
+.DS_Store
+
+# test code
+src/tests/
