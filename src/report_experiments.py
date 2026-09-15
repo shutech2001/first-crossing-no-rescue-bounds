@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 import io
+import math
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -164,7 +164,8 @@ REPLICATION_SOURCES = {
     "gamma": ("gamma/gamma_replications.csv", ["n", "gamma", "model_contains_truth", "method"]),
     "joint": ("joint/replications.csv", ["setting", "n", "method"]),
     "continuous_outcome": (
-        "continuous_outcome/continuous_outcome_replications.csv", ["n", "method"],
+        "continuous_outcome/continuous_outcome_replications.csv",
+        ["n", "method"],
     ),
 }
 REFERENCE_SOURCES = {
@@ -367,7 +368,7 @@ def fmt(value: Any, *, integer: bool = False, scientific: bool = False) -> str:
     if not math.isfinite(x):
         return "--"
     if integer:
-        return f"${int(round(x))}$"
+        return f"${round(x)}$"
     if x == 0:
         return "$0.00$"
     mantissa, power = f"{x:.2e}".split("e")
@@ -378,7 +379,14 @@ def fmt(value: Any, *, integer: bool = False, scientific: bool = False) -> str:
 
 
 def sci(value: Any) -> str:
-    """Use the same three significant digits in scientific notation."""
+    """Use the same three significant digits in scientific notation.
+
+    Args:
+        value (Any): The value.
+
+    Returns:
+        str: The formatted value.
+    """
     return fmt(value, scientific=True)
 
 
@@ -441,8 +449,10 @@ class Report:
             with zipfile.ZipFile(self.bundle) as bundle:
                 try:
                     with bundle.open(source) as stream:
-                        return [{k: parse(v) for k, v in row.items()}
-                                for row in csv.DictReader(io.TextIOWrapper(stream))]
+                        return [
+                            {k: parse(v) for k, v in row.items()}
+                            for row in csv.DictReader(io.TextIOWrapper(stream))
+                        ]
                 except KeyError:
                     self.missing.append(source)
                     return []
@@ -762,8 +772,11 @@ class Report:
             ["External calibration", "Mean width", "Set coverage"],
             [
                 [
-                    "Exact" if r["setting"] == -1 else "None" if r["setting"] == 0
-                    else fmt(r["setting"], integer=True),
+                    (
+                        "Exact"
+                        if r["setting"] == -1
+                        else "None" if r["setting"] == 0 else fmt(r["setting"], integer=True)
+                    ),
                     fmt(r.get("length")),
                     fmt(r.get("set_cover")),
                 ]
@@ -778,10 +791,7 @@ class Report:
         self.table(
             "atomic-kl",
             ["Input-region construction", "Mean width", "Set coverage"],
-            [
-                [METHODS[r["method"]], fmt(r.get("length")), fmt(r.get("set_cover"))]
-                for r in atomic
-            ],
+            [[METHODS[r["method"]], fmt(r.get("length")), fmt(r.get("set_cover"))] for r in atomic],
         )
         continuous_outcome = [
             row
@@ -796,8 +806,10 @@ class Report:
                 [
                     fmt(r["n"], integer=True),
                     "Cell Wald" if r["method"] == "wald" else METHODS[r["method"]],
-                    fmt(r.get("length")), fmt(r.get("length_mcse")),
-                    fmt(r.get("set_cover")), mc_interval(r),
+                    fmt(r.get("length")),
+                    fmt(r.get("length_mcse")),
+                    fmt(r.get("set_cover")),
+                    mc_interval(r),
                 ]
                 for r in continuous_outcome
             ],
@@ -805,12 +817,24 @@ class Report:
         self.joint_table()
 
     def joint_groups(self) -> list[tuple[str, int, list[dict]]]:
-        """Return the archived joint comparisons in benchmark setting order."""
+        """Return the archived joint comparisons in benchmark setting order.
+
+        Returns:
+            list[tuple[str, int, list[dict]]]: The joint groups.
+        """
         groups: dict[tuple, list[dict]] = {}
         for row in self.data["joint"]:
             groups.setdefault((row["setting"], row["n"]), []).append(row)
 
-        def order(item):
+        def order(item: tuple[tuple[str, int], list[dict]]) -> tuple[int, int, str]:
+            """Order the joint groups.
+
+            Args:
+                item (tuple[tuple[str, int], list[dict]]): The item.
+
+            Returns:
+                tuple[int, int, str]: The ordered item.
+            """
             (setting, n), rows = item
             index = number(rows[0].get("setting_index"))
             if not math.isfinite(index):
@@ -820,12 +844,18 @@ class Report:
         return [(setting, n, rows) for (setting, n), rows in sorted(groups.items(), key=order)]
 
     def joint_table(self) -> None:
-        """Write the paired joint-region comparison using observed Monte Carlo summaries."""
+        """Write the paired joint-region comparison using observed Monte Carlo summaries.
+
+        Args:
+            self (Report): The report.
+        """
         lines = [
             r"\begin{tabular}{@{}lrrrrrr@{}}",
             r"\toprule",
-            r"Procedure & \shortstack{Mean\\width} & MC SE & Difference & "
-            r"\shortstack{Paired\\MC SE} & \shortstack{Set\\coverage} & $95\%$ MC interval \\",
+            (
+                r"Procedure & \shortstack{Mean\\width} & MC SE & Difference & "
+                r"\shortstack{Paired\\MC SE} & \shortstack{Set\\coverage} & $95\%$ MC interval \\"
+            ),
             r"\midrule",
         ]
         groups = self.joint_groups()
@@ -1200,8 +1230,12 @@ class Report:
         Returns:
             dict: The result.
         """
-        for name in ("all_tables.tex", "external-radius.tex", "reference-precision.tex",
-                     "reduction-checks.tex"):
+        for name in (
+            "all_tables.tex",
+            "external-radius.tex",
+            "reference-precision.tex",
+            "reduction-checks.tex",
+        ):
             (self.tables / name).unlink(missing_ok=True)
         (self.figures / "joint_widths.pdf").unlink(missing_ok=True)
         return {"artifacts": self.artifacts, "missing_sources": self.missing}
@@ -1228,9 +1262,11 @@ def generate_reports(
         Path(figures) if figures is not None else archive / "figures",
         Path(tables) if tables is not None else archive / "tables",
     )
-    joint_only = bool(report.raw["joint"]) and not any(
-        rows for name, rows in report.raw.items() if name != "joint"
-    ) and not any(report.data[name] for name in REFERENCE_SOURCES)
+    joint_only = (
+        bool(report.raw["joint"])
+        and not any(rows for name, rows in report.raw.items() if name != "joint")
+        and not any(report.data[name] for name in REFERENCE_SOURCES)
+    )
     if joint_only:
         report.joint_table()
         result = report.finish()
