@@ -1,6 +1,6 @@
 # Experiments for "First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue"
 
-Reproducible code for the numerical experiments in "First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue".
+Reproducible code for the numerical experiments in "[**First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue**](https://arxiv.org/abs/2609.17495)".
 
 ## Reproducing the Experiments
 
@@ -43,6 +43,16 @@ The output directory contains:
 - `figures/`: 8 manuscript PDF figures.
 
 Rerun an interrupted command unchanged to resume. Use a new output directory for another simulation run; completed results are preserved.
+
+## Citation
+```bibtex
+@article{tamano2026first,
+    author={Tamano, Shu},
+    journal={arXiv preprint arXiv:2609.17495},
+    title={First-Crossing Reduction and Inference for No-Rescue Effects under Deterministic Rescue},
+    year={2026},
+}
+```
 
 ## Contact
 If you have any question, please feel free to contact: tamano-shu212@g.ecc.u-tokyo.ac.jp
